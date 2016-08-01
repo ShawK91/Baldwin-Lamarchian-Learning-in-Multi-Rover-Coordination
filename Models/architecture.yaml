@@ -1,0 +1,16 @@
+"class_name: Sequential\nconfig:\n- class_name: LSTM\n  config:\n    U_regularizer:\
+  \ null\n    W_regularizer: null\n    activation: tanh\n    b_regularizer: null\n\
+  \    batch_input_shape: !!python/tuple [null, 3, 144]\n    consume_less: cpu\n \
+  \   dropout_U: 0.0\n    dropout_W: 0.0\n    forget_bias_init: one\n    go_backwards:\
+  \ false\n    init: he_uniform\n    inner_activation: sigmoid\n    inner_init: orthogonal\n\
+  \    input_dim: 144\n    input_dtype: float32\n    input_length: null\n    name:\
+  \ lstm_1\n    output_dim: 1\n    return_sequences: false\n    stateful: false\n\
+  \    trainable: true\n    unroll: false\n- class_name: SReLU\n  config: {a_left_init:\
+  \ glorot_uniform, a_right_init: one, name: srelu_1, t_left_init: zero,\n    t_right_init:\
+  \ glorot_uniform, trainable: true}\n- class_name: Dense\n  config: {W_constraint:\
+  \ null, W_regularizer: null, activation: linear, activity_regularizer: null,\n \
+  \   b_constraint: null, b_regularizer: null, bias: true, init: he_uniform, input_dim:\
+  \ null,\n    name: dense_1, output_dim: 1, trainable: true}\nkeras_version: 1.0.5\n\
+  loss: mse\noptimizer: {beta_1: 0.8999999761581421, beta_2: 0.9990000128746033, epsilon:\
+  \ 1.0e-08,\n  lr: 0.0020000000949949026, name: Nadam, schedule_decay: 0.004}\nsample_weight_mode:\
+  \ null\n"

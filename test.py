@@ -5,9 +5,51 @@ import numpy as np
 import mod_rqe as mod
 from keras.models import model_from_json
 from pympler import summary
+import MultiNEAT as NEAT
+from MultiNEAT import EvaluateGenomeList_Serial
 
 
 #MACROS
+#NEAT parameters
+if True:
+    params = NEAT.Parameters()
+    params.PopulationSize = 50
+    params.DynamicCompatibility = True
+    params.WeightDiffCoeff = 4.0
+    params.CompatTreshold = 2.0
+    params.YoungAgeTreshold = 15
+    params.SpeciesMaxStagnation = 15
+    params.OldAgeTreshold = 35
+    params.MinSpecies = 5
+    params.MaxSpecies = 10
+    params.RouletteWheelSelection = True
+    params.RecurrentProb = 0.5
+    params.OverallMutationRate = 0.8
+
+    params.MutateWeightsProb = 0.90
+
+    params.WeightMutationMaxPower = 2.5
+    params.WeightReplacementMaxPower = 5.0
+    params.MutateWeightsSevereProb = 0.5
+    params.WeightMutationRate = 0.25
+
+    params.MaxWeight = 8
+
+    params.MutateAddNeuronProb = 0.05
+    params.MutateAddLinkProb = 0.05
+    params.MutateRemLinkProb = 0.0
+
+    params.MinActivationA = 4.9
+    params.MaxActivationA = 4.9
+
+    params.ActivationFunction_SignedSigmoid_Prob = 0.0
+    params.ActivationFunction_UnsignedSigmoid_Prob = 1.0
+    params.ActivationFunction_Tanh_Prob = 0.0
+    params.ActivationFunction_SignedStep_Prob = 0.0
+
+    params.CrossoverRate = 0.75  # mutate only 0.25
+    params.MultipointCrossoverRate = 0.4
+    params.SurvivalRate = 0.2
 if True: #Macros
     grid_row = 10
     grid_col = 10
@@ -174,27 +216,7 @@ def import_models(in_filename, save_filename, model_arch):
 
 
 
-
-
-
-
-
-
-
-
-
-if __name__ == "__main__":
-    gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand,
-                              angled_repr=angled_repr, angle_res=angle_res, obs_dist=obs_dist,
-                              coupling=coupling)  # Create gridworld
-    #mod.dispGrid(gridworld)
-    nn_state, steps, tot_reward = reset_board()  # Reset board
-    print nn_state[0]
-
-
-    sys.exit()
-    #q_model = mod.load_model()
-
+def putracking():
     from pympler import tracker
     tr = tracker.SummaryTracker()
     #tr.print_diff()
@@ -204,6 +226,26 @@ if __name__ == "__main__":
     #mod.dispGrid(gridworld)
     #tr = tracker.SummaryTracker()
     tr.print_diff()
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+
+    gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand,
+                              angled_repr=angled_repr, angle_res=angle_res, obs_dist=obs_dist,
+                              coupling=coupling)  # Create gridworld
+    g = NEAT.Genome(0, 360 * 4 / angle_res, 0, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
+                    NEAT.ActivationFunction.UNSIGNED_SIGMOID, 0, params)
+    h = NEAT.Genome(1, 360 * 4 / angle_res, 0, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
+                    NEAT.ActivationFunction.UNSIGNED_SIGMOID, 0, params)
+
+
+
 
 
 

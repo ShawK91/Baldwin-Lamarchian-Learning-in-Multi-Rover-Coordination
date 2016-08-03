@@ -199,9 +199,9 @@ class Gridworld:
                     reward += 1.0 - 1.0 / (len(self.poi_soft_status[poi_id]) + 1)
                 if len(self.poi_soft_status[poi_id]) >= self.coupling:
                     self.goal_complete[poi_id] = True
-                    reward += 1
+                    reward = 1
 
-        return reward, None
+        return reward
 
     def update_soft_states(self): #Reset soft states
         self.poi_soft_status = [] #Reset soft_status
@@ -212,9 +212,11 @@ class Gridworld:
                 if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
                     self.poi_soft_status[poi_id].append(ag)
 
-    def get_state(self, agent_id):  # Returns a flattened array around the agent position
+    def get_state(self, agent_id, prev_action = 0):  # Returns a flattened array around the agent position
         if self.angled_repr: #If state representation uses angle
             st = self.angled_state(agent_id)
+            st = np.append(st, prev_action) #Add action to the state
+            st = np.reshape(st, (1,len(st)))
             return st
         else: #DEPRECATED - IGNORE (BINARY ENCODING REPRESENTATION)
             x_beg = self.agent_pos[agent_id][0] - self.observe
@@ -230,6 +232,7 @@ class Gridworld:
             for i in range(len(st[0])):
                 k[i][int(st[0][i])] = 1
             k = np.reshape(k, (1, len(st[0]) * 4))  # Flatten array
+
             return k
 
     def get_first_state(self, agent_id, use_rnn):  # Get first state, action input to the q_net
@@ -245,8 +248,8 @@ class Gridworld:
         rnn_state = np.reshape(rnn_state, (1, rnn_state.shape[0], rnn_state.shape[2]))
         return rnn_state
 
-    def referesh_state(self, current_state, agent_id, use_rnn):
-        st = self.get_state(agent_id)
+    def referesh_state(self, current_state, agent_id, use_rnn, prev_action):
+        st = self.get_state(agent_id, prev_action)
         if use_rnn:
             new_state = np.roll(current_state, -1, axis=1)
             new_state[0][2] = st
@@ -348,20 +351,21 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, desi
     model.compile(loss='mse', optimizer='Nadam')
     return model
 
-def init_nn(gridworld, hidden_nodes, angled_repr, angle_res):
+def init_nn(hidden_nodes, angle_res, middle_layer = False, weights = 0):
     model = Sequential()
-    if angled_repr:
-        sa_sp = (360/angle_res) * 4
+    sa_sp = (360/angle_res) * 4 + 1
+    if middle_layer:
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights))
     else:
-        sa_sp = (pow(gridworld.observe * 2 + 1,2)) * 4
-    model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform'))
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform'))
     #model.add(LeakyReLU(alpha=.2))
-    #model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
-    model.add(Activation('sigmoid'))
+    model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
+    #model.add(Activation('sigmoid'))
     #model.add(Dropout(0.1))
     #model.add(Activation('sigmoid'))
     #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
-    model.add(Dense(1, init= 'he_uniform'))
+    if not middle_layer:
+        model.add(Dense(sa_sp-1, init= 'he_uniform'))
     model.compile(loss='mse', optimizer='Nadam')
     return model
 

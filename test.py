@@ -229,7 +229,38 @@ def putracking():
 
 
 
+def test_nets():
+    from fann2 import libfann
+    from keras.models import Sequential
+    from keras.layers import Dense, Dropout, Activation
+    from keras.layers import LSTM, GRU, SimpleRNN
+    from keras.layers.advanced_activations import LeakyReLU, PReLU, SReLU
+    from keras.models import model_from_json
+    from keras.layers.normalization import BatchNormalization
+    from keras.optimizers import SGD, Nadam
+    test_x = np.arange(50)
+    model = Sequential()
+    model.add(Dense(50, input_dim=50, init='he_uniform'))
+    model.add(Activation('sigmoid'))
+    sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    model.add(Dense(1, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer='Nadam')
+    ann = libfann.neural_net()
+    ann.create_standard_array([3, 50, 50, 1])
+    ann.set_activation_function_output(libfann.SIGMOID_SYMMETRIC_STEPWISE)
 
+    curtime = time.time()
+    for i in range (1000000):
+        ann.run(test_x)
+    elapsed = time.time() - curtime
+    print elapsed
+
+    test_x = np.reshape(test_x, (1,50))
+    curtime = time.time()
+    for i in range (1000000):
+        model.predict(test_x)
+    elapsed = time.time() - curtime
+    print elapsed
 
 
 

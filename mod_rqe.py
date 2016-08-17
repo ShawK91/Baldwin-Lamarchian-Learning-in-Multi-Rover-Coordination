@@ -1,15 +1,13 @@
-import numpy as np
+
 from random import randint
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Activation
 from keras.layers import LSTM, GRU, SimpleRNN
-from keras.layers.advanced_activations import LeakyReLU, PReLU, SReLU
-from keras.models import model_from_json
-from keras.layers.normalization import BatchNormalization
-from keras.optimizers import SGD, Nadam
-import math, sys
-import json
-import numpy as np
+from keras.layers.advanced_activations import SReLU
+from keras.regularizers import l2, activity_l2
+from keras.optimizers import SGD
+import math
+import numpy as np, time
 import random
 
 
@@ -19,8 +17,8 @@ def save_model(model):
     model.save_weights('shaw_2/model_weights.h5',overwrite=True)
 
 class Gridworld:
-    def __init__(self, dim_row = 10, dim_column = 10, observe = 2, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1, coupling = 2):
-        self.observe = observe #Deprecated
+    def __init__(self, dim_row = 10, dim_column = 10, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1, coupling = 2):
+        self.observe = 1 #Deprecated
         self.dim_row = dim_row
         self.dim_col = dim_column
         self.num_agents = num_agents
@@ -137,7 +135,6 @@ class Gridworld:
         self.agent_pos.append([x,y])
         return [x,y]
 
-
     def reset(self, agent_rand, poi_rand):
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
@@ -171,12 +168,8 @@ class Gridworld:
         y = next_pos[1]
         if self.state[x][y] == 3:  # Wall
             next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
-            #reward = -0.0001
         if self.state[x][y] == 1 and action != 0:  # Other Agent
-            #reward = -0.05
             next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
-        #if self.state[x][y] == 0 or (self.state[x][y] == 1 and action == 0):  # Free Space
-            #reward = -0.0001
         if self.state[x][y] == 2 and action != 0: #POI
             next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
 
@@ -196,12 +189,13 @@ class Gridworld:
                 except: 1+1
                 if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
                     self.poi_soft_status[poi_id].append(agent_id)
-                    reward += 1.0 - 1.0 / (len(self.poi_soft_status[poi_id]) + 1)
                 if len(self.poi_soft_status[poi_id]) >= self.coupling:
                     self.goal_complete[poi_id] = True
-                    reward = 1
 
-        return reward
+
+
+
+
 
     def update_soft_states(self): #Reset soft states
         self.poi_soft_status = [] #Reset soft_status
@@ -212,10 +206,14 @@ class Gridworld:
                 if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
                     self.poi_soft_status[poi_id].append(ag)
 
-    def get_state(self, agent_id, prev_action = 0):  # Returns a flattened array around the agent position
+    def get_state(self, agent_id):  # Returns a flattened array around the agent position
         if self.angled_repr: #If state representation uses angle
             st = self.angled_state(agent_id)
-            st = np.append(st, prev_action) #Add action to the state
+            st = np.append(st, 0) #Add action to the state
+            st = np.append(st, 0)  # Add action to the state
+            st = np.append(st, 0)  # Add action to the state
+            st = np.append(st, 0)  # Add action to the state
+            st = np.append(st, 0)  # Add action to the state
             st = np.reshape(st, (1,len(st)))
             return st
         else: #DEPRECATED - IGNORE (BINARY ENCODING REPRESENTATION)
@@ -248,8 +246,8 @@ class Gridworld:
         rnn_state = np.reshape(rnn_state, (1, rnn_state.shape[0], rnn_state.shape[2]))
         return rnn_state
 
-    def referesh_state(self, current_state, agent_id, use_rnn, prev_action):
-        st = self.get_state(agent_id, prev_action)
+    def referesh_state(self, current_state, agent_id, use_rnn):
+        st = self.get_state(agent_id)
         if use_rnn:
             new_state = np.roll(current_state, -1, axis=1)
             new_state[0][2] = st
@@ -293,7 +291,7 @@ class Gridworld:
     def angled_state(self, agent_id):
         state = np.zeros(((360/self.angle_res), 4))
         for id in range(self.num_poi):
-            if self.goal_complete[id] == False: #For all POI's that are still active
+            if True: #FOR ALL POI's #self.goal_complete[id] == False: #For all POI's that are still active
                 x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
                 y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
@@ -320,7 +318,23 @@ class Gridworld:
 
 
 
+class statistics():
+    def __init__(self):
+        self.fitnesses = []
+        self.avg_fitness = 0
+        self.tr_avg_fit = []
 
+    def add_fitness(self, fitness, generation):
+        self.fitnesses.append(fitness)
+        if len(self.fitnesses) > 200:
+            self.fitnesses.pop(0)
+        self.avg_fitness = sum(self.fitnesses)/len(self.fitnesses)
+        if generation % 10 == 0: #Save to csv file
+            self.save_csv(generation)
+
+    def save_csv(self, generation):
+        self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
+        np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
 class prettyfloat(float):
     def __repr__(self):
@@ -353,21 +367,81 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, desi
 
 def init_nn(hidden_nodes, angle_res, middle_layer = False, weights = 0):
     model = Sequential()
-    sa_sp = (360/angle_res) * 4 + 1
+    sa_sp = (360/angle_res) * 4 + 5
     if middle_layer:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights))
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.1)))
     else:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform'))
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform', W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.1)))
     #model.add(LeakyReLU(alpha=.2))
     model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
     #model.add(Activation('sigmoid'))
     #model.add(Dropout(0.1))
     #model.add(Activation('sigmoid'))
-    #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True)
     if not middle_layer:
-        model.add(Dense(sa_sp-1, init= 'he_uniform'))
-    model.compile(loss='mse', optimizer='Nadam')
+        model.add(Dense(sa_sp, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer=sgd)
     return model
+
+def dev_EvaluateGenomeList_Serial(genome_list, evaluator, display=True):
+    fitnesses = []
+    id_list = []
+    count = 0
+    curtime = time.time()
+    best_f = 0
+    best_genome = None
+    for g in genome_list:
+        id_list.append(g.GetID())
+        f = evaluator(g)
+        fitnesses.append(f)
+        if f > best_f:
+            best_genome = g
+
+        if display:
+            #if ipython_installed: clear_output(wait=True)
+            print('Individuals: (%s/%s) Fitness: %3.4f' % (count, len(genome_list), f))
+        count += 1
+
+    elapsed = time.time() - curtime
+
+    if display:
+        print('seconds elapsed: %s' % elapsed)
+
+    return fitnesses, id_list, best_genome
+
+def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=True, ipython_client=None):
+    #''' If ipython_client is None, will use concurrent.futures.
+    #Pass an instance of Client() in order to use an IPython cluster '''
+    fitnesses = []
+    curtime = time.time()
+
+    #if ipython_client is None:# or not ipython_installed:
+    with ProcessPoolExecutor(max_workers=cores) as executor:
+        for i, fitness in enumerate(executor.map(evaluator, genome_list)):
+            fitnesses += [fitness]
+
+            if display:
+                #if ipython_installed: clear_output(wait=True)
+                print('Individuals: (%s/%s) Fitness: %3.4f' % (i, len(genome_list), fitness))
+    #else:
+
+        # if type(ipython_client) == Client:
+        #     lbview = ipython_client.load_balanced_view()
+        #     amr = lbview.map(evaluator, genome_list, ordered=True, block=False)
+        #     for i, fitness in enumerate(amr):
+        #         if display:
+        #             #if ipython_installed: clear_output(wait=True)
+        #             print('Individual:', i, 'Fitness:', fitness)
+        #         fitnesses.append(fitness)
+        # else:
+        #     raise ValueError('Please provide valid IPython.parallel Client() as ipython_client')
+
+    elapsed = time.time() - curtime
+
+    if display:
+        print('seconds elapsed: %3.4f' % elapsed)
+
+    return fitnesses
 
 
 def q_values(hist_input, q_model):
@@ -526,3 +600,101 @@ def save_qmodel(q_model, foldername = '/Models/'):
     #Save weights
     for i in range(len(q_model)):
         q_model[i].save_weights('Models/model_weights_' + str(i) + '.h5', overwrite=True)
+
+def roulette_wheel(scores):
+    scores = scores / np.sum(scores)  # Normalize
+    rand = random.random()
+    counter = 0
+    for i in range(len(scores)):
+        counter += scores[i]
+        if rand < counter:
+            return i
+
+#BACKUPS
+def bck_move_and_get_reward(self, agent_id, action):
+    next_pos = np.copy(self.agent_pos[agent_id])
+    if action == 1:
+        next_pos[1] += 1  # Right
+    elif action == 2:
+        next_pos[0] += 1  # Down
+    elif action == 3:
+        next_pos[1] -= 1  # Left
+    elif action == 4:
+        next_pos[0] -= 1  # Up
+
+    # Computer reward and check illegal moves
+    reward = 0  # If nothing else
+    x = next_pos[0]
+    y = next_pos[1]
+    if self.state[x][y] == 3:  # Wall
+        next_pos[0] = self.agent_pos[agent_id][0];
+        next_pos[1] = self.agent_pos[agent_id][1]
+        # reward = -0.0001
+    if self.state[x][y] == 1 and action != 0:  # Other Agent
+        # reward = -0.05
+        next_pos[0] = self.agent_pos[agent_id][0];
+        next_pos[1] = self.agent_pos[agent_id][1]
+        # if self.state[x][y] == 0 or (self.state[x][y] == 1 and action == 0):  # Free Space
+        # reward = -0.0001
+    if self.state[x][y] == 2 and action != 0:  # POI
+        next_pos[0] = self.agent_pos[agent_id][0];
+        next_pos[1] = self.agent_pos[agent_id][1]
+
+    # Update gridworld and agent position
+    if self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] != 2:
+        self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] = 0
+    if self.state[next_pos[0]][next_pos[1]] != 2:
+        self.state[next_pos[0]][next_pos[1]] = 1
+    self.agent_pos[agent_id][0] = next_pos[0]
+    self.agent_pos[agent_id][1] = next_pos[1]
+
+    # Check for credit assignment
+    for poi_id in range(self.num_poi):  # POI COUPLED
+        if self.goal_complete[poi_id] == False:
+            try:
+                self.poi_soft_status[poi_id].remove(agent_id)
+            except:
+                1 + 1
+            if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(
+                            self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
+                self.poi_soft_status[poi_id].append(agent_id)
+                reward += 1.0 - 1.0 / (len(self.poi_soft_status[poi_id]) + 1)
+            if len(self.poi_soft_status[poi_id]) >= self.coupling:
+                self.goal_complete[poi_id] = True
+                reward = 1
+
+    return reward
+
+
+def test_nets():
+    from fann2 import libfann
+    from keras.models import Sequential
+    from keras.layers import Dense, Dropout, Activation
+    from keras.layers import LSTM, GRU, SimpleRNN
+    from keras.layers.advanced_activations import LeakyReLU, PReLU, SReLU
+    from keras.models import model_from_json
+    from keras.layers.normalization import BatchNormalization
+    from keras.optimizers import SGD, Nadam
+    test_x = np.arange(50)
+    model = Sequential()
+    model.add(Dense(50, input_dim=50, init='he_uniform'))
+    model.add(Activation('sigmoid'))
+    sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    model.add(Dense(1, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer='Nadam')
+    ann = libfann.neural_net()
+    ann.create_standard_array([3, 50, 50, 1])
+    ann.set_activation_function_output(libfann.SIGMOID_SYMMETRIC_STEPWISE)
+
+    curtime = time.time()
+    for i in range (1000000):
+        ann.run(test_x)
+    elapsed = time.time() - curtime
+    print elapsed
+
+    test_x = np.reshape(test_x, (1,50))
+    curtime = time.time()
+    for i in range (1000000):
+        model.predict(test_x)
+    elapsed = time.time() - curtime
+    print elapsed

@@ -388,26 +388,30 @@ def dev_EvaluateGenomeList_Serial(genome_list, evaluator, display=True):
     id_list = []
     count = 0
     curtime = time.time()
-    best_f = 0
+    best_f = 0; best_index = 0
     best_genome = None
+    index = 0
     for g in genome_list:
+
         id_list.append(g.GetID())
-        f = evaluator(g)
+        f = evaluator(g, index)
         fitnesses.append(f)
         if f > best_f:
             best_genome = g
+            best_index = index
+        index += 1
 
         if display:
             #if ipython_installed: clear_output(wait=True)
             print('Individuals: (%s/%s) Fitness: %3.4f' % (count, len(genome_list), f))
         count += 1
 
+    if best_genome != None: best_genome.Save('best')
     elapsed = time.time() - curtime
-
     if display:
         print('seconds elapsed: %s' % elapsed)
 
-    return fitnesses, id_list, best_genome
+    return fitnesses, id_list, best_index
 
 def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=True, ipython_client=None):
     #''' If ipython_client is None, will use concurrent.futures.

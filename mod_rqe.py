@@ -11,6 +11,7 @@ import numpy as np, time
 import random
 
 
+
 def save_model(model):
     json_string = model.to_json()
     open('model_architecture.json', 'w').write(json_string)
@@ -109,7 +110,7 @@ class Gridworld:
     def init_agent(self, rand_start):
         start = self.observe
         end = self.state.shape[0] - self.observe-1
-        rad = int(self.dim_row/math.sqrt(3)/2)
+        rad = int(self.dim_row/math.sqrt(3)/3)
         center = int((start + end)/2)
         if rand_start:
             while True:
@@ -206,9 +207,9 @@ class Gridworld:
                 if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
                     self.poi_soft_status[poi_id].append(ag)
 
-    def get_state(self, agent_id):  # Returns a flattened array around the agent position
+    def get_state(self, agent_id, sensor_avg):  # Returns a flattened array around the agent position
         if self.angled_repr: #If state representation uses angle
-            st = self.angled_state(agent_id)
+            st = self.angled_state(agent_id, sensor_avg)
             st = np.append(st, 0) #Add action to the state
             st = np.append(st, 0)  # Add action to the state
             st = np.append(st, 0)  # Add action to the state
@@ -233,9 +234,9 @@ class Gridworld:
 
             return k
 
-    def get_first_state(self, agent_id, use_rnn):  # Get first state, action input to the q_net
+    def get_first_state(self, agent_id, use_rnn, sensor_avg):  # Get first state, action input to the q_net
         if not use_rnn: #Normal NN
-            st = self.get_state(agent_id)
+            st = self.get_state(agent_id, sensor_avg)
             return st
 
         rnn_state = []
@@ -288,17 +289,24 @@ class Gridworld:
         dist = math.sqrt(dist)
         return angle, dist
 
-    def angled_state(self, agent_id):
+    def angled_state(self, agent_id, sensor_avg):
         state = np.zeros(((360/self.angle_res), 4))
+        if sensor_avg: #Average distance
+            dist_poi_list = [[] for x in xrange(360/self.angle_res)]
+            dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
+
         for id in range(self.num_poi):
             if True: #FOR ALL POI's #self.goal_complete[id] == False: #For all POI's that are still active
                 x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
                 y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
                 bracket = int(angle / self.angle_res)
-                state[bracket][0] += 1 #Add POIs
-                if state[bracket][1] > dist or state[bracket][1] == 0:  # Update min distance from POI
-                    state[bracket][1] = dist
+                state[bracket][0] += 1.0/self.num_poi #Add POIs
+                if sensor_avg: dist_poi_list[bracket].append(dist/(2.0*self.dim_col))
+                else: #Min distance
+                    if state[bracket][1] > dist/(2.0*self.dim_col) or state[bracket][1] == 0:  # Update min distance from POI
+                        state[bracket][1] = dist/(2.0*self.dim_col)
+
 
         for id in range(self.num_agents):
             if id != agent_id: #FOR ALL AGENTS MINUS MYSELF
@@ -306,10 +314,19 @@ class Gridworld:
                 y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
                 bracket = int(angle / self.angle_res)
-                state[bracket][2] += 1 #Add agent
-                if state[bracket][3] > dist or state[bracket][3] == 0: #Update min distance from other agent
-                    state[bracket][3] = dist
+                state[bracket][2] += 1.0/(self.num_agents-1) #Add agent
+                if sensor_avg: dist_agent_list[bracket].append(dist/(2.0*self.dim_col))
+                else: #Min distance
+                    if state[bracket][3] > dist/(2.0*self.dim_col) or state[bracket][3] == 0: #Update min distance from other agent
+                        state[bracket][3] = dist/(2.0*self.dim_col)
 
+        if sensor_avg:
+            for bracket in range(len(dist_agent_list)):
+
+                try: state[bracket][1] = sum(dist_poi_list[bracket])/len(dist_poi_list[bracket]) #Encode average POI distance
+                except: None
+                try: state[bracket][3] = sum(dist_agent_list[bracket]) / len(dist_agent_list[bracket])  # Encode average POI distance
+                except: None
 
         state = np.reshape(state, (1, 360/self.angle_res * 4)) #Flatten array
         return state
@@ -318,11 +335,11 @@ class Gridworld:
 
 
 
-class statistics():
+class statistics(): #Tracker
     def __init__(self):
-        self.fitnesses = []
-        self.avg_fitness = 0
-        self.tr_avg_fit = []
+        self.fitnesses = []; self.avg_fitness = 0; self.tr_avg_fit = []
+        self.avg_mpc = 0; self.tr_avg_mpc = []; self.mpc_std = []; self.tr_mpc_std = []
+
 
     def add_fitness(self, fitness, generation):
         self.fitnesses.append(fitness)
@@ -332,14 +349,21 @@ class statistics():
         if generation % 10 == 0: #Save to csv file
             self.save_csv(generation)
 
+    def add_mpc(self, all_pop):
+        all_mpc = np.zeros(len(all_pop))
+        for i, sub_pop in enumerate(all_pop): all_mpc[i] = sub_pop.delta_mpc
+        self.avg_mpc = np.average(all_mpc) #Average mpc
+        self.mpc_std = np.std(all_mpc)
+
+
     def save_csv(self, generation):
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
+
 class prettyfloat(float):
     def __repr__(self):
         return "%0.2f" % self
-
 
 
 def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, design = 1):
@@ -365,53 +389,29 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, desi
     model.compile(loss='mse', optimizer='Nadam')
     return model
 
-def init_nn(hidden_nodes, angle_res, middle_layer = False, weights = 0):
+def init_nn(hidden_nodes, angle_res, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
     model = Sequential()
     sa_sp = (360/angle_res) * 4 + 5
     if middle_layer:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.1)))
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     else:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform', W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.1)))
+        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform', W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     #model.add(LeakyReLU(alpha=.2))
-    model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
-    #model.add(Activation('sigmoid'))
+    #model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
+    model.add(Activation('sigmoid'))
     #model.add(Dropout(0.1))
     #model.add(Activation('sigmoid'))
-    sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True)
+    sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
     if not middle_layer:
         model.add(Dense(sa_sp, init= 'he_uniform'))
     model.compile(loss='mse', optimizer=sgd)
+
+    if pretrain: #Autoencoder pretraining
+        model.fit(train_x, train_x, nb_epoch=50, batch_size=32, shuffle=True, validation_data=(valid_x, valid_x),
+                        verbose=1)
+
     return model
 
-def dev_EvaluateGenomeList_Serial(genome_list, evaluator, display=True):
-    fitnesses = []
-    id_list = []
-    count = 0
-    curtime = time.time()
-    best_f = 0; best_index = 0
-    best_genome = None
-    index = 0
-    for g in genome_list:
-
-        id_list.append(g.GetID())
-        f = evaluator(g, index)
-        fitnesses.append(f)
-        if f > best_f:
-            best_genome = g
-            best_index = index
-        index += 1
-
-        if display:
-            #if ipython_installed: clear_output(wait=True)
-            print('Individuals: (%s/%s) Fitness: %3.4f' % (count, len(genome_list), f))
-        count += 1
-
-    if best_genome != None: best_genome.Save('best')
-    elapsed = time.time() - curtime
-    if display:
-        print('seconds elapsed: %s' % elapsed)
-
-    return fitnesses, id_list, best_index
 
 def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=True, ipython_client=None):
     #''' If ipython_client is None, will use concurrent.futures.
@@ -446,7 +446,6 @@ def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=Tru
         print('seconds elapsed: %3.4f' % elapsed)
 
     return fitnesses
-
 
 def q_values(hist_input, q_model):
     # action_ind = hist_input.shape[2] - 1

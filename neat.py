@@ -5,24 +5,25 @@ from random import randint, choice
 
 
 hidden_nodes = 20  # Simulator hidden nodes (also the input to the Evo-net
-augmented_input = 1
-baldwin = 0
+augmented_input = 0
+baldwin =  0
 online_learning = 1
 update_sim = 1
 pre_train = 0
 D_reward = 1 #D reward scheme
+sim_all = 1 #Simulator learns to predict the enmtrie state including the POI's
 
 vizualize = False
-share_sim_subpop = 1 #Share simulator within a sub-population
+share_sim_subpop = 0 #Share simulator within a sub-population
 sensor_avg = True #Average distance as state input vs (min distance by default)
 
 if True:
     params = NEAT.Parameters()
-    params.PopulationSize = 100
+    params.PopulationSize = 10
     fs_neat = False
     evo_hidden = 0
-    params.MinSpecies = 5
-    params.MaxSpecies = 10
+    #params.MinSpecies = 5
+    #params.MaxSpecies = 10
     params.EliteFraction = 0.05
     params.RecurrentProb = 0.2
     params.RecurrentLoopProb = 0.2
@@ -43,14 +44,14 @@ if True:
 
 #ROVER DOMAIN MACROS
 if True: #Macros
-    grid_row = 15
-    grid_col = 15
+    grid_row = 10
+    grid_col = 10
     obs_dist = 1 #Observe distance (Radius of POI that agents have to be in for successful observation)
-    coupling = 3 #Number of agents required to simultaneously observe a POI
-    total_steps = 30 #Total roaming steps without goal before termination
-    num_agents = 4
-    num_poi = 2
-    angle_res = 90
+    coupling = 1 #Number of agents required to simultaneously observe a POI
+    total_steps = 40 #Total roaming steps without goal before termination
+    num_agents = 1
+    num_poi = 10
+    angle_res = 30
 
     agent_rand = 1
     poi_rand = 1
@@ -66,6 +67,17 @@ if True: #Macros
 
 tracker = mod.statistics()
 gridworld = mod.Gridworld (grid_row, grid_col, num_agents, num_poi, agent_rand, poi_rand, angled_repr=angled_repr, angle_res=angle_res, obs_dist=obs_dist, coupling=coupling)  # Create gridworld
+
+
+def sim_input_transform(input): #CHange state input to agent only input
+    if sim_all: return input
+    transformed_inp = []
+    for i in range(len(input[0])):
+        if i % 4 >= 2 or i >= len(input[0]) - 5:
+            transformed_inp.append(input[0][i])
+    transformed_inp = np.array(transformed_inp)
+    transformed_inp = np.reshape(transformed_inp, (1, len(transformed_inp)))
+    return transformed_inp
 
 def reset_board():
     gridworld.reset(agent_rand, poi_rand)
@@ -112,12 +124,12 @@ else:
 class baldwin_util:
     def __init__(self):
         if share_sim_subpop:
-            self.simulator = mod.init_nn(hidden_nodes, angle_res, pre_train, train_x, valid_x)
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, middle_layer=True, weights=self.simulator.layers[0].get_weights())
+            self.simulator = mod.init_nn(hidden_nodes, angle_res, sim_all, pre_train, train_x, valid_x)
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, middle_layer=True, weights=self.simulator.layers[0].get_weights())
         else:
             self.simulator = []
-            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, pre_train, train_x, valid_x))  # Create simulator for each agent
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
+            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, sim_all, pre_train, train_x, valid_x))  # Create simulator for each agent
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
         self.traj_x = []; self.traj_y = []  # trajectory for batch learning
         self.best_sim_index = 0
 
@@ -130,6 +142,7 @@ class baldwin_util:
 
     # Get the inputs to the Evo-net (extract hidden nodes from the sim-net)
     def get_evo_input(self, input):  # Extract the hidden layer representatiuon that will be the input to the EvoNet
+        input = sim_input_transform(input) #Agent only prediction scheme
         evo_inp = self.interim_model.predict(input)
         evo_inp = np.reshape(evo_inp, (len(evo_inp[0])))
         return evo_inp
@@ -178,6 +191,9 @@ class evo_net():
         self.base_mpc = self.pop.GetBaseMPC()
         self.current_mpc = self.pop.GetCurrentMPC()
         self.delta_mpc = self.current_mpc - self.base_mpc
+        self.oldest_genome_id = 0
+        self.youngest_genome_id = 0
+        self.delta_age = self.oldest_genome_id - self.youngest_genome_id
 
 
 
@@ -191,9 +207,6 @@ class evo_net():
             self.net_list[index] = NEAT.NeuralNetwork();
             self.genome_list[index].BuildPhenotype(self.net_list[index]);
             self.net_list[index].Flush()  # Build net from genome
-
-
-
 
     # Get action choice from Evo-net
     def run_evo_net(self, index, state):
@@ -214,6 +227,9 @@ class evo_net():
         return action
 
     def update_fitness(self): #Update the fitnesses of the genome and also encode the best one for the generation
+
+        ids = []
+        youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
         best = 0; best_sim_index = 0
         for i, g in enumerate(self.genome_list):
             if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
@@ -223,6 +239,15 @@ class evo_net():
                     best_sim_index = i
                 g.SetFitness(avg_fitness) #Update fitness
                 g.SetEvaluated() #Set as evaluated
+                ids.append(g.GetID())
+                if g.GetID() > youngest: youngest = g.GetID();
+                if g.GetID() < oldest: oldest = g.GetID();
+
+        print max(ids) - min(ids)
+        self.oldest_genome_id = oldest
+        self.youngest_genome_id = youngest
+        self.delta_age = self.youngest_genome_id - self.oldest_genome_id
+
         if baldwin: self.bald.best_sim_index = best_sim_index #Assign the new top simulator #TODO Generalize this to best performing index and ignore if not evaluated
         self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc #Update MPC's as well
 
@@ -292,12 +317,12 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
             action = all_pop[agent_id].run_evo_net(teams[agent_id], evo_input) #Get action from the Evo-net
             #action = randint(0,4)
             gridworld.move_and_get_reward(agent_id, action) #Move gridworld
-            x.append(nn_state[agent_id][:]); x[agent_id][0][len(x[0])-4+action] = 1 #Code action taken into the x learning target
+            x.append(sim_input_transform(nn_state[agent_id][:])); x[agent_id][0][len(x[0])-4+action] = 1 #Code action taken into the x learning target
 
         #Get new nnstates after all an episode of moves have completed
         for agent_id in range(num_agents):
             nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg)
-        y = (nn_state[agent_id])
+        y = sim_input_transform(nn_state[agent_id])
         if baldwin:
             for i in range(len(all_pop)):
                 all_pop[i].bald.learning(x[i], y, teams[i]) #Learning
@@ -335,8 +360,9 @@ if __name__ == "__main__":
         best_global = evolve(all_pop) #CCEA
         tracker.add_fitness(best_global, gen) #Add best global performance to tracker
         tracker.add_mpc(all_pop) #Update mpc statistics
-        print 'Gen:', gen, ' Baldwin' if baldwin else ' Darwinian', 'Online' if online_learning else 'Offline', ' Best global reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), ' MPC_spread:', int(tracker.mpc_std)
-
+        print 'Gen:', gen, ' Baldwin' if baldwin else ' Darwinian', 'Online' if online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), '+-', int(tracker.mpc_std), ' Delta generations Survival: ',
+        for i in range(num_agents): print all_pop[i].delta_age/params.PopulationSize,
+        print
         continue
 
 

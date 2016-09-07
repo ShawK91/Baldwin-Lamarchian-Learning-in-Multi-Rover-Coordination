@@ -296,7 +296,7 @@ class Gridworld:
             dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
 
         for id in range(self.num_poi):
-            if True: #FOR ALL POI's #self.goal_complete[id] == False: #For all POI's that are still active
+            if self.goal_complete[id] == False: #For all POI's that are still active
                 x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
                 y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
@@ -332,9 +332,6 @@ class Gridworld:
         return state
 
 
-
-
-
 class statistics(): #Tracker
     def __init__(self):
         self.fitnesses = []; self.avg_fitness = 0; self.tr_avg_fit = []
@@ -366,7 +363,7 @@ class prettyfloat(float):
         return "%0.2f" % self
 
 
-def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, design = 1):
+def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len = 3, design = 1):
     model = Sequential()
     if angled_repr:
         sa_sp = (360/angle_res) * 4
@@ -389,9 +386,10 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, desi
     model.compile(loss='mse', optimizer='Nadam')
     return model
 
-def init_nn(hidden_nodes, angle_res, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
+def init_nn(hidden_nodes, angle_res, sim_all, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
     model = Sequential()
-    sa_sp = (360/angle_res) * 4 + 5
+    if sim_all: sa_sp = (360/angle_res) * 4 + 5
+    else: sa_sp = (360/angle_res) * 2 + 5
     if middle_layer:
         model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     else:

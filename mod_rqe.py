@@ -19,34 +19,29 @@ def save_model(model):
 
 class Gridworld:
     def __init__(self, dim_row = 10, dim_column = 10, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1, coupling = 2):
-        self.observe = 1 #Deprecated
-        self.dim_row = dim_row
-        self.dim_col = dim_column
-        self.num_agents = num_agents
-        self.angle_res = angle_res #Angle resolution
+        self.observe = 1; self.dim_row = dim_row; self.dim_col = dim_column
+        self.num_agents = num_agents; self.num_poi = num_poi; self.angle_res = angle_res #Angle resolution
         self.angled_repr = angled_repr #Angled state representation
-        if num_agents > 1:
-            self.coupling = coupling #coupling requirement
-        else:
-            self.coupling = 1
+        if num_agents > 1: self.coupling = coupling #coupling requirement
+        else: self.coupling = 1
         self.obs_dist = obs_dist #Observation radius requirements
-        self.num_poi = num_poi
-        self.num_poi = num_poi
-
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
-        self.poi_pos = []
-        self.goal_complete = []
-        self.poi_soft_status = []
+
+        #Resettable stuff
+        self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
+        self.init_wall()
+        self.poi_pos = []; self.goal_complete = []; self.poi_obs = []
         for i in range(self.num_poi):
             self.init_poi(poi_rand) #Initialize POIs
-            self.goal_complete.append(False)
-            self.poi_soft_status.append([])
+            self.goal_complete.append(False) #Check if goal is complete
+            self.poi_obs.append([]) #Track the identity of agents within the coupling requirements at all applicable time steps
+
         self.agent_pos = []
         for i in range(self.num_agents):
             self.init_agent(agent_rand)
-        self.optimal_steps = self.get_optimal_steps()
-        self.update_soft_states()
+        #self.optimal_steps = self.get_optimal_steps()
+        #self.update_soft_states()
 
 
     def init_wall(self):
@@ -139,64 +134,65 @@ class Gridworld:
     def reset(self, agent_rand, poi_rand):
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
-        self.poi_pos = []
-        self.goal_complete = []
-        self.poi_soft_status = []
+        self.poi_pos = []; self.goal_complete = []; self.poi_obs = []
         for i in range(self.num_poi):
             self.init_poi(poi_rand) #Initialize POIs
-            self.goal_complete.append(False)
-            self.poi_soft_status.append([])
+            self.goal_complete.append(False) #Check if goal is complete
+            self.poi_obs.append([]) #Track the identity of agents within the coupling requirements at all applicable time steps
+
         self.agent_pos = []
         for i in range(self.num_agents):
             self.init_agent(agent_rand)
-        self.optimal_steps = self.get_optimal_steps()
-        self.update_soft_states()
+        #self.optimal_steps = self.get_optimal_steps()
+        #self.update_soft_states()
 
-    def move_and_get_reward(self, agent_id, action):
-        next_pos = np.copy(self.agent_pos[agent_id])
-        if action == 1:
-            next_pos[1] += 1  # Right
-        elif action == 2:
-            next_pos[0] += 1  # Down
-        elif action == 3:
-            next_pos[1] -= 1  # Left
-        elif action == 4:
-            next_pos[0] -= 1  # Up
+    def move(self, all_actions):
+        for agent_id in range(self.num_agents): #Move all agents (first agent has priority in case of conflict)
+            action = all_actions[agent_id]
+            next_pos = np.copy(self.agent_pos[agent_id])
+            if action == 1: next_pos[1] += 1  # Right
+            elif action == 2: next_pos[0] += 1  # Down
+            elif action == 3: next_pos[1] -= 1  # Left
+            elif action == 4: next_pos[0] -= 1  # Up
 
-        # Computer reward and check illegal moves
-        reward = 0 #If nothing else
-        x = next_pos[0]
-        y = next_pos[1]
-        if self.state[x][y] == 3:  # Wall
-            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
-        if self.state[x][y] == 1 and action != 0:  # Other Agent
-            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
-        if self.state[x][y] == 2 and action != 0: #POI
-            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
+            # Computer reward and check illegal moves
+            x = next_pos[0]; y = next_pos[1]
+            if self.state[x][y] == 3: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] # Wall
+            if self.state[x][y] == 1 and action != 0: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] # Other Agent
+            if self.state[x][y] == 2 and action != 0: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] #POI
 
-        # Update gridworld and agent position
-        if self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] != 2:
-            self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] = 0
-        if self.state[next_pos[0]][next_pos[1]]!= 2:
-            self.state[next_pos[0]][next_pos[1]] = 1
-        self.agent_pos[agent_id][0] = next_pos[0]
-        self.agent_pos[agent_id][1] = next_pos[1]
+            # Update gridworld and agent position
+            if self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] != 2:
+                self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] = 0
+            if self.state[next_pos[0]][next_pos[1]]!= 2:
+                self.state[next_pos[0]][next_pos[1]] = 1
+            self.agent_pos[agent_id][0] = next_pos[0]
+            self.agent_pos[agent_id][1] = next_pos[1]
 
+    def update_poi_observations(self):
         #Check for credit assignment
         for poi_id in range(self.num_poi): # POI COUPLED
-            if self.goal_complete[poi_id] == False:
-                try:
-                    self.poi_soft_status[poi_id].remove(agent_id)
-                except: 1+1
-                if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
-                    self.poi_soft_status[poi_id].append(agent_id)
-                if len(self.poi_soft_status[poi_id]) >= self.coupling:
-                    self.goal_complete[poi_id] = True
+            soft_stat = []
+            for ag in range(self.num_agents):
+                if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist: # and self.goal_complete[poi_id] == False:
+                    soft_stat.append(ag)
+            if len(soft_stat) >= self.coupling: #If coupling requirement is met
+                self.goal_complete[poi_id] = True
+                self.poi_obs[poi_id].append(soft_stat) #Store the identity of agents aiding in meeting that tight coupling requirement
 
 
 
 
 
+        # for poi_id in range(self.num_poi): # POI COUPLED
+        #     if self.goal_complete[poi_id] == False:
+        #         try:
+        #             self.poi_soft_status[poi_id].remove(agent_id)
+        #         except: 1+1
+        #         if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
+        #             self.poi_soft_status[poi_id].append(agent_id)
+        #         if len(self.poi_soft_status[poi_id]) >= self.coupling:
+        #             self.goal_complete[poi_id] = True
 
     def update_soft_states(self): #Reset soft states
         self.poi_soft_status = [] #Reset soft_status
@@ -284,28 +280,31 @@ class Gridworld:
         dot = x2 * x1 + y2 * y1  # dot product
         det = x2 * y1 - y2 * x1  # determinant
         angle = math.atan2(det, dot)  # atan2(y, x) or atan2(sin, cos)
-        angle = math.degrees(angle)
+        #angle = math.degrees(angle)
         dist = x1 * x1 + y1 * y1
         dist = math.sqrt(dist)
         return angle, dist
 
     def angled_state(self, agent_id, sensor_avg):
-        state = np.zeros(((360/self.angle_res), 4))
+        state = np.zeros(self.num_agents *2 + self.num_poi *2)
         if sensor_avg: #Average distance
             dist_poi_list = [[] for x in xrange(360/self.angle_res)]
             dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
 
         for id in range(self.num_poi):
-            if self.goal_complete[id] == False: #For all POI's that are still active
+            if True: #self.goal_complete[id] == False: #For all POI's that are still active
                 x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
                 y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                bracket = int(angle / self.angle_res)
-                state[bracket][0] += 1.0/self.num_poi #Add POIs
-                if sensor_avg: dist_poi_list[bracket].append(dist/(2.0*self.dim_col))
-                else: #Min distance
-                    if state[bracket][1] > dist/(2.0*self.dim_col) or state[bracket][1] == 0:  # Update min distance from POI
-                        state[bracket][1] = dist/(2.0*self.dim_col)
+                state[2*id] = angle
+                state[2*id+1] = dist/(2.0*self.dim_col)
+
+                #bracket = int(angle / self.angle_res)
+                #state[bracket][0] += 1.0/self.num_poi #Add POIs
+                #if sensor_avg: dist_poi_list[bracket].append(dist/(2.0*self.dim_col))
+                #else: #Min distance
+                    #if state[bracket][1] > dist/(2.0*self.dim_col) or state[bracket][1] == 0:  # Update min distance from POI
+                        #state[bracket][1] = dist/(2.0*self.dim_col)
 
 
         for id in range(self.num_agents):
@@ -313,12 +312,14 @@ class Gridworld:
                 x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
                 y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
                 angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                bracket = int(angle / self.angle_res)
-                state[bracket][2] += 1.0/(self.num_agents-1) #Add agent
-                if sensor_avg: dist_agent_list[bracket].append(dist/(2.0*self.dim_col))
-                else: #Min distance
-                    if state[bracket][3] > dist/(2.0*self.dim_col) or state[bracket][3] == 0: #Update min distance from other agent
-                        state[bracket][3] = dist/(2.0*self.dim_col)
+                state[2*self.num_poi+2 * id] = angle
+                state[2*self.num_poi + 2 * id + 1] = dist / (2.0 * self.dim_col)
+                # bracket = int(angle / self.angle_res)
+                # state[bracket][2] += 1.0/(self.num_agents-1) #Add agent
+                # if sensor_avg: dist_agent_list[bracket].append(dist/(2.0*self.dim_col))
+                # else: #Min distance
+                #     if state[bracket][3] > dist/(2.0*self.dim_col) or state[bracket][3] == 0: #Update min distance from other agent
+                #         state[bracket][3] = dist/(2.0*self.dim_col)
 
         if sensor_avg:
             for bracket in range(len(dist_agent_list)):
@@ -328,9 +329,8 @@ class Gridworld:
                 try: state[bracket][3] = sum(dist_agent_list[bracket]) / len(dist_agent_list[bracket])  # Encode average POI distance
                 except: None
 
-        state = np.reshape(state, (1, 360/self.angle_res * 4)) #Flatten array
+        state = np.reshape(state, (1, self.num_agents *2 + self.num_poi *2)) #Flatten array
         return state
-
 
 class statistics(): #Tracker
     def __init__(self):
@@ -357,11 +357,9 @@ class statistics(): #Tracker
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
-
 class prettyfloat(float):
     def __repr__(self):
         return "%0.2f" % self
-
 
 def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len = 3, design = 1):
     model = Sequential()
@@ -386,10 +384,11 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len 
     model.compile(loss='mse', optimizer='Nadam')
     return model
 
-def init_nn(hidden_nodes, angle_res, sim_all, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
+def init_nn(hidden_nodes, angle_res, sim_all, gridworld, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
     model = Sequential()
-    if sim_all: sa_sp = (360/angle_res) * 4 + 5
-    else: sa_sp = (360/angle_res) * 2 + 5
+    # if sim_all: sa_sp = (360/angle_res) * 4 + 5
+    # else: sa_sp = (360/angle_res) * 2 + 5
+    sa_sp = gridworld.num_agents * 2 + gridworld.num_poi * 2 + 5
     if middle_layer:
         model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     else:
@@ -409,7 +408,6 @@ def init_nn(hidden_nodes, angle_res, sim_all, pretrain=False, train_x = 0, valid
                         verbose=1)
 
     return model
-
 
 def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=True, ipython_client=None):
     #''' If ipython_client is None, will use concurrent.futures.
@@ -699,3 +697,59 @@ def test_nets():
         model.predict(test_x)
     elapsed = time.time() - curtime
     print elapsed
+
+
+def bck_angled_state(self, agent_id, sensor_avg):
+    state = np.zeros(((360 / self.angle_res), 4))
+    if sensor_avg:  # Average distance
+        dist_poi_list = [[] for x in xrange(360 / self.angle_res)]
+        dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
+
+    for id in range(self.num_poi):
+        if self.goal_complete[id] == False:  # For all POI's that are still active
+            x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0];
+            x2 = 1
+            y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1];
+            y2 = 0
+            angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+            bracket = int(angle / self.angle_res)
+            state[bracket][0] += 1.0 / self.num_poi  # Add POIs
+            if sensor_avg:
+                dist_poi_list[bracket].append(dist / (2.0 * self.dim_col))
+            else:  # Min distance
+                if state[bracket][1] > dist / (2.0 * self.dim_col) or state[bracket][
+                    1] == 0:  # Update min distance from POI
+                    state[bracket][1] = dist / (2.0 * self.dim_col)
+
+    for id in range(self.num_agents):
+        if id != agent_id:  # FOR ALL AGENTS MINUS MYSELF
+            x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0];
+            x2 = 1
+            y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1];
+            y2 = 0
+            angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+            bracket = int(angle / self.angle_res)
+            state[bracket][2] += 1.0 / (self.num_agents - 1)  # Add agent
+            if sensor_avg:
+                dist_agent_list[bracket].append(dist / (2.0 * self.dim_col))
+            else:  # Min distance
+                if state[bracket][3] > dist / (2.0 * self.dim_col) or state[bracket][
+                    3] == 0:  # Update min distance from other agent
+                    state[bracket][3] = dist / (2.0 * self.dim_col)
+
+    if sensor_avg:
+        for bracket in range(len(dist_agent_list)):
+
+            try:
+                state[bracket][1] = sum(dist_poi_list[bracket]) / len(
+                    dist_poi_list[bracket])  # Encode average POI distance
+            except:
+                None
+            try:
+                state[bracket][3] = sum(dist_agent_list[bracket]) / len(
+                    dist_agent_list[bracket])  # Encode average POI distance
+            except:
+                None
+
+    state = np.reshape(state, (1, 360 / self.angle_res * 4))  # Flatten array
+    return state

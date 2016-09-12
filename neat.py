@@ -6,7 +6,7 @@ from random import randint, choice
 
 hidden_nodes = 20  # Simulator hidden nodes (also the input to the Evo-net
 augmented_input = 0
-baldwin =  0
+baldwin =  1
 online_learning = 1
 update_sim = 1
 pre_train = 0
@@ -22,18 +22,17 @@ if True:
     params.PopulationSize = 10
     fs_neat = False
     evo_hidden = 0
-    #params.MinSpecies = 5
-    #params.MaxSpecies = 10
+    params.MinSpecies = 5
+    params.MaxSpecies = 10
     params.EliteFraction = 0.05
     params.RecurrentProb = 0.2
     params.RecurrentLoopProb = 0.2
 
-    params.MaxWeight = 5
-    params.MutateAddNeuronProb = 0.005
-    params.MutateAddLinkProb = 0.005
+    params.MaxWeight = 8
+    params.MutateAddNeuronProb = 0.01
+    params.MutateAddLinkProb = 0.05
     params.MutateRemLinkProb = 0.01
-    params.MutateAddLinkProb = 0.03
-    params.MutateRemSimpleNeuronProb = 0.0005
+    params.MutateRemSimpleNeuronProb = 0.005
     params.MutateNeuronActivationTypeProb = 0.005
 
     params.ActivationFunction_SignedSigmoid_Prob = 0.01
@@ -44,13 +43,13 @@ if True:
 
 #ROVER DOMAIN MACROS
 if True: #Macros
-    grid_row = 10
-    grid_col = 10
+    grid_row = 15
+    grid_col = 15
     obs_dist = 1 #Observe distance (Radius of POI that agents have to be in for successful observation)
-    coupling = 1 #Number of agents required to simultaneously observe a POI
-    total_steps = 40 #Total roaming steps without goal before termination
-    num_agents = 1
-    num_poi = 10
+    coupling = 2 #Number of agents required to simultaneously observe a POI
+    total_steps = 30 #Total roaming steps without goal before termination
+    num_agents = 4
+    num_poi = 8
     angle_res = 30
 
     agent_rand = 1
@@ -124,12 +123,12 @@ else:
 class baldwin_util:
     def __init__(self):
         if share_sim_subpop:
-            self.simulator = mod.init_nn(hidden_nodes, angle_res, sim_all, pre_train, train_x, valid_x)
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, middle_layer=True, weights=self.simulator.layers[0].get_weights())
+            self.simulator = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, pre_train, train_x, valid_x)
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, middle_layer=True, weights=self.simulator.layers[0].get_weights())
         else:
             self.simulator = []
-            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, sim_all, pre_train, train_x, valid_x))  # Create simulator for each agent
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
+            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld,  pre_train, train_x, valid_x))  # Create simulator for each agent
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
         self.traj_x = []; self.traj_y = []  # trajectory for batch learning
         self.best_sim_index = 0
 
@@ -243,7 +242,7 @@ class evo_net():
                 if g.GetID() > youngest: youngest = g.GetID();
                 if g.GetID() < oldest: oldest = g.GetID();
 
-        print max(ids) - min(ids)
+        #print max(ids) - min(ids)
         self.oldest_genome_id = oldest
         self.youngest_genome_id = youngest
         self.delta_age = self.youngest_genome_id - self.oldest_genome_id
@@ -285,11 +284,17 @@ if baldwin: bald = baldwin_util()
 
 def diff_reward(gridworld):
     rewards = np.zeros(gridworld.num_agents)
-    for i in range(gridworld.num_poi):
-        if gridworld.goal_complete[i]:
-            for ag in gridworld.poi_soft_status[i]:
-                rewards[ag] += 1
+    for poi_id in range(gridworld.num_poi):
+        if gridworld.goal_complete[poi_id]:
+            obs_history = gridworld.poi_obs[poi_id]
+            no_reward = False
+            for ids in obs_history:
+                if len(ids) > gridworld.coupling: #Only if it's observed by exactly the numbers needed
+                    no_reward = True; break;
+            if not no_reward:
+                for agent_id in obs_history[0]: rewards[agent_id] += 1 #Reward the first group of agents to get there
     return rewards
+
 
 def run_simulation(all_pop, teams): #Run simulation given a team and return fitness for each individuals in that team
     nn_state, steps, tot_reward = reset_board()  # Reset board
@@ -299,8 +304,9 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
     #rewards = np.zeros(len(teams))
 
     for steps in range(total_steps):  # One training episode till goal is not reached
-        x = []
-        for agent_id in range(num_agents):  # 1 turn per agent
+        x = [] #Learning targets
+        all_actions = [] #All action choices from the agents
+        for agent_id in range(num_agents):  #get all the action choices from the agents
             #TODO OPTIMIZE THESE VARIABLES
             state_inp = nn_state[agent_id][:]
             state_inp = state_inp[0][0:-5] #Delete last 5 action elements
@@ -313,11 +319,13 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
                 evo_input = np.reshape(nn_state[agent_id], (nn_state[agent_id].shape[1])) #State input only (non -baldwin)
             #print 'STate: ',state_inp
             #print 'Evo: ',agent_id, 'NUM', evo_input
-            #print
             action = all_pop[agent_id].run_evo_net(teams[agent_id], evo_input) #Get action from the Evo-net
             #action = randint(0,4)
-            gridworld.move_and_get_reward(agent_id, action) #Move gridworld
+            all_actions.append(action) #Store all agent's actions
             x.append(sim_input_transform(nn_state[agent_id][:])); x[agent_id][0][len(x[0])-4+action] = 1 #Code action taken into the x learning target
+
+        gridworld.move(all_actions) #Move gridworld
+        gridworld.update_poi_observations() #Figure out the POI observations and store all credit information
 
         #Get new nnstates after all an episode of moves have completed
         for agent_id in range(num_agents):
@@ -337,19 +345,32 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
     else: rewards = np.zeros(gridworld.num_agents) + g_reward #global reward
     return rewards, g_reward
 
+def random_baseline():
+    total_trials = 1000
+    g_reward = 0
+    for trials in range(total_trials):
+            nn_state, steps, tot_reward = reset_board()  # Reset board
+            for steps in range(total_steps):  # One training episode till goal is not reached
+                all_actions = []  # All action choices from the agents
+                for agent_id in range(num_agents):  # get all the action choices from the agents
+                    action = randint(0,4); all_actions.append(action)  # Store all agent's actions
+                gridworld.move(all_actions)  # Move gridworld
+                gridworld.update_poi_observations()  # Figure out the POI observations and store all credit information
 
+                # Get new nnstates after all an episode of moves have completed
+                for agent_id in range(num_agents):
+                    nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg)
+                if gridworld.check_goal_complete(): break
+            g_reward += 100 * sum(gridworld.goal_complete) / num_poi  # Global Reward
+    print 'Random Baseline: ', g_reward/total_trials
 
-
-
-
-    fitness = rover_sim(net, index)
-    return fitness
 
 
 if __name__ == "__main__":
+    #random_baseline()
     mod.dispGrid(gridworld)
     seed = 0 if (evo_hidden == 0) else 1 #Controls sees based on genome initialization
-    evo_input_size = hidden_nodes + (360 / angle_res) * 4 if baldwin else 360 * 4 / angle_res #Controls input size to Evo_input
+    evo_input_size = hidden_nodes + num_agents *2 + num_poi *2 if baldwin else num_agents *2 + num_poi *2 #Controls input size to Evo_input
     all_pop = [] #Contains all the evo-net populations for all the teams
     for i in range(num_agents): #Spawn populations of team of agents
         all_pop.append(evo_net(evo_input_size, seed))

@@ -43,7 +43,6 @@ class Gridworld:
         #self.optimal_steps = self.get_optimal_steps()
         #self.update_soft_states()
 
-
     def init_wall(self):
         for i in range(self.observe):
             for x in range(self.state.shape[0]):
@@ -180,10 +179,6 @@ class Gridworld:
                 self.goal_complete[poi_id] = True
                 self.poi_obs[poi_id].append(soft_stat) #Store the identity of agents aiding in meeting that tight coupling requirement
 
-
-
-
-
         # for poi_id in range(self.num_poi): # POI COUPLED
         #     if self.goal_complete[poi_id] == False:
         #         try:
@@ -203,9 +198,9 @@ class Gridworld:
                 if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
                     self.poi_soft_status[poi_id].append(ag)
 
-    def get_state(self, agent_id, sensor_avg):  # Returns a flattened array around the agent position
+    def get_state(self, agent_id, sensor_avg, state_representation):  # Returns a flattened array around the agent position
         if self.angled_repr: #If state representation uses angle
-            st = self.angled_state(agent_id, sensor_avg)
+            st = self.angled_state(agent_id, sensor_avg, state_representation)
             st = np.append(st, 0) #Add action to the state
             st = np.append(st, 0)  # Add action to the state
             st = np.append(st, 0)  # Add action to the state
@@ -230,9 +225,9 @@ class Gridworld:
 
             return k
 
-    def get_first_state(self, agent_id, use_rnn, sensor_avg):  # Get first state, action input to the q_net
+    def get_first_state(self, agent_id, use_rnn, sensor_avg, state_representation):  # Get first state, action input to the q_net
         if not use_rnn: #Normal NN
-            st = self.get_state(agent_id, sensor_avg)
+            st = self.get_state(agent_id, sensor_avg, state_representation)
             return st
 
         rnn_state = []
@@ -285,51 +280,84 @@ class Gridworld:
         dist = math.sqrt(dist)
         return angle, dist
 
-    def angled_state(self, agent_id, sensor_avg):
-        state = np.zeros(self.num_agents *2 + self.num_poi *2)
-        if sensor_avg: #Average distance
-            dist_poi_list = [[] for x in xrange(360/self.angle_res)]
-            dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
+    def angled_state(self, agent_id, sensor_avg, state_representation):
+        if state_representation == 2: #List agent/POI representation fully obserbavle
+            state = np.zeros(self.num_agents *2 + self.num_poi *2)
+            if sensor_avg: #Average distance
+                dist_poi_list = [[] for x in xrange(360/self.angle_res)]
+                dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
 
-        for id in range(self.num_poi):
-            if True: #self.goal_complete[id] == False: #For all POI's that are still active
-                x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
-                y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
-                angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                state[2*id] = angle
-                state[2*id+1] = dist/(2.0*self.dim_col)
+            for id in range(self.num_poi):
+                if True: #self.goal_complete[id] == False: #For all POI's that are still active
+                    x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
+                    y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
+                    angle, dist = self.get_angle_dist(x1,y1,x2,y2)
+                    state[2*id] = angle
+                    state[2*id+1] = dist/(2.0*self.dim_col)
 
-                #bracket = int(angle / self.angle_res)
-                #state[bracket][0] += 1.0/self.num_poi #Add POIs
-                #if sensor_avg: dist_poi_list[bracket].append(dist/(2.0*self.dim_col))
-                #else: #Min distance
-                    #if state[bracket][1] > dist/(2.0*self.dim_col) or state[bracket][1] == 0:  # Update min distance from POI
-                        #state[bracket][1] = dist/(2.0*self.dim_col)
+            for id in range(self.num_agents):
+                if id != agent_id: #FOR ALL AGENTS MINUS MYSELF
+                    x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
+                    y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
+                    angle, dist = self.get_angle_dist(x1,y1,x2,y2)
+                    state[2*self.num_poi+2 * id] = angle
+                    state[2*self.num_poi + 2 * id + 1] = dist / (2.0 * self.dim_col)
+            state = np.reshape(state, (1, self.num_agents *2 + self.num_poi *2)) #Flatten array
 
+        if state_representation == 1: #Angle brackets
+            state = np.zeros(((360 / self.angle_res), 4))
+            if sensor_avg:  # Average distance
+                dist_poi_list = [[] for x in xrange(360 / self.angle_res)]
+                dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
 
-        for id in range(self.num_agents):
-            if id != agent_id: #FOR ALL AGENTS MINUS MYSELF
-                x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
-                y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
-                angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                state[2*self.num_poi+2 * id] = angle
-                state[2*self.num_poi + 2 * id + 1] = dist / (2.0 * self.dim_col)
-                # bracket = int(angle / self.angle_res)
-                # state[bracket][2] += 1.0/(self.num_agents-1) #Add agent
-                # if sensor_avg: dist_agent_list[bracket].append(dist/(2.0*self.dim_col))
-                # else: #Min distance
-                #     if state[bracket][3] > dist/(2.0*self.dim_col) or state[bracket][3] == 0: #Update min distance from other agent
-                #         state[bracket][3] = dist/(2.0*self.dim_col)
+            for id in range(self.num_poi):
+                if self.goal_complete[id] == False:  # For all POI's that are still active
+                    x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0];
+                    x2 = 1
+                    y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1];
+                    y2 = 0
+                    angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+                    bracket = int(angle / self.angle_res)
+                    state[bracket][0] += 1.0 / self.num_poi  # Add POIs
+                    if sensor_avg:
+                        dist_poi_list[bracket].append(dist / (2.0 * self.dim_col))
+                    else:  # Min distance
+                        if state[bracket][1] > dist / (2.0 * self.dim_col) or state[bracket][
+                            1] == 0:  # Update min distance from POI
+                            state[bracket][1] = dist / (2.0 * self.dim_col)
 
-        if sensor_avg:
-            for bracket in range(len(dist_agent_list)):
+            for id in range(self.num_agents):
+                if id != agent_id:  # FOR ALL AGENTS MINUS MYSELF
+                    x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0];
+                    x2 = 1
+                    y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1];
+                    y2 = 0
+                    angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+                    bracket = int(angle / self.angle_res)
+                    state[bracket][2] += 1.0 / (self.num_agents - 1)  # Add agent
+                    if sensor_avg:
+                        dist_agent_list[bracket].append(dist / (2.0 * self.dim_col))
+                    else:  # Min distance
+                        if state[bracket][3] > dist / (2.0 * self.dim_col) or state[bracket][
+                            3] == 0:  # Update min distance from other agent
+                            state[bracket][3] = dist / (2.0 * self.dim_col)
 
-                try: state[bracket][1] = sum(dist_poi_list[bracket])/len(dist_poi_list[bracket]) #Encode average POI distance
-                except: None
-                try: state[bracket][3] = sum(dist_agent_list[bracket]) / len(dist_agent_list[bracket])  # Encode average POI distance
-                except: None
+            if sensor_avg:
+                for bracket in range(len(dist_agent_list)):
 
-        state = np.reshape(state, (1, self.num_agents *2 + self.num_poi *2)) #Flatten array
+                    try:
+                        state[bracket][1] = sum(dist_poi_list[bracket]) / len(
+                            dist_poi_list[bracket])  # Encode average POI distance
+                    except:
+                        None
+                    try:
+                        state[bracket][3] = sum(dist_agent_list[bracket]) / len(
+                            dist_agent_list[bracket])  # Encode average POI distance
+                    except:
+                        None
+
+            state = np.reshape(state, (1, 360 / self.angle_res * 4))  # Flatten array
+
         return state
 
 class statistics(): #Tracker
@@ -361,6 +389,64 @@ class prettyfloat(float):
     def __repr__(self):
         return "%0.2f" % self
 
+class population():
+    def __init__(self, input_size, hidden_nodes, output, population_size, elite_fraction = 0.1):
+        self.population_size = population_size
+        self.elite_fraction = int(elite_fraction * population_size)
+        self.net_pop = [] #List of networks
+        for i in range(population_size): self.net_pop.append(self.init_net(input_size, hidden_nodes, output))
+        self.pop_handle = np.zeros(population_size * 2, dtype=np.float64) #COntrols the indexing to the net population (net_pop) and fitness values
+        self.pop_handle = np.reshape(self.pop_handle, (population_size, 2))
+        for x in range(population_size):  self.pop_handle[x][0] = x #Initializing our net population indexing
+        self.longest_survivor = 0
+        self.best_net_index = 0 #Current index of the best net
+
+
+
+    def init_net(self, input_size, hidden_nodes, output):
+        model = Sequential()
+        model.add(Dense(hidden_nodes, input_dim=input_size, init='he_uniform'))
+        model.add(Activation('sigmoid'))
+        model.add(Dense(output))
+        model.add(Activation('softmax'))
+        model.compile(loss='mean_absolute_error', optimizer='Nadam')
+        return model
+
+    def Epoch(self):
+        self.pop_handle = self.pop_handle[self.pop_handle[:, 1].argsort()]  ##Ranked on fitness (reverse of weakness) s.t. 0 index is the best
+        if int(self.pop_handle[0][0]) == self.best_net_index: self.longest_survivor += 1 #Check if the leader candidate is the same one
+        else:
+            self.longest_survivor = 0; self.best_net_index = int(self.pop_handle[0][0])
+        self.best_net_index = self.pop_handle[0][0] #Update the leader candidate
+        for x in range(self.elite_fraction, self.population_size): #Mutate to renew population
+            many = 1; much = randint(1,10)
+            if (randint(1,100) == 91):
+                many = randint(1,10); much = randint(1,100)
+            self.mutate(self.net_pop[int(self.pop_handle[x][0])], self.net_pop[int(self.pop_handle[x][0])], many, much) #Mutate same model in and out
+
+    def mutate(self, model_in, model_out, many_strength=1, much_strength=1):
+        # NOTE: Takes in_num file, mutates it and saves as out_num file, many_strength denotes how many mutation while
+        # much_strength controls how strong each mutation is
+
+        w = model_in.get_weights()
+        for many in range(many_strength):  # Number of mutations
+            i = randint(0, len(w) - 1)
+            if len(w[i].shape) == 1:  # Bias
+                j = randint(0, len(w[i]) - 1)
+                w[i][j] += np.random.normal(-0.1 * much_strength, 0.1 * much_strength)
+                # if (randint(1, 100) == 5): #SUPER MUTATE
+                #     w[i][j] += np.random.normal(-1 * much_strength, 1 * much_strength)
+            else:  # Bias
+                j = randint(0, len(w[i]) - 1)
+                k = randint(0, len(w[i][j]) - 1)
+                w[i][j][k] += np.random.normal(-0.1 * much_strength, 0.1 * much_strength)
+                # if (randint(1, 100) == 5):  # SUPER MUTATE
+                #     w[i][j][k] += np.random.normal(-1 * much_strength, 1 * much_strength)
+        model_out.set_weights(w)  # Save weights
+
+
+
+
 def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len = 3, design = 1):
     model = Sequential()
     if angled_repr:
@@ -384,11 +470,14 @@ def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len 
     model.compile(loss='mse', optimizer='Nadam')
     return model
 
-def init_nn(hidden_nodes, angle_res, sim_all, gridworld, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
+def init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
     model = Sequential()
-    # if sim_all: sa_sp = (360/angle_res) * 4 + 5
-    # else: sa_sp = (360/angle_res) * 2 + 5
-    sa_sp = gridworld.num_agents * 2 + gridworld.num_poi * 2 + 5
+    if state_representation == 2:
+        sa_sp = gridworld.num_agents * 2 + gridworld.num_poi * 2 + 5
+    elif state_representation == 1:
+        if sim_all: sa_sp = (360/angle_res) * 4 + 5
+        else: sa_sp = (360/angle_res) * 2 + 5
+
     if middle_layer:
         model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     else:
@@ -609,6 +698,8 @@ def roulette_wheel(scores):
         if rand < counter:
             return i
 
+
+
 #BACKUPS
 def bck_move_and_get_reward(self, agent_id, action):
     next_pos = np.copy(self.agent_pos[agent_id])
@@ -753,3 +844,116 @@ def bck_angled_state(self, agent_id, sensor_avg):
 
     state = np.reshape(state, (1, 360 / self.angle_res * 4))  # Flatten array
     return state
+
+
+def novelty(weak_matrix, archive, k = 10):
+    import bottleneck
+    #Handle early gens with archive size less that 10
+    if (len(archive) < k):
+        k = len(archive)
+
+    novel_matrix = np.zeros(len(archive))
+    for i in range(len(archive)):
+        novel_matrix[i] = np.sum(np.square(weak_matrix - archive[i]))
+
+    #k-nearest neighbour algorithm
+    k_neigh = bottleneck.partsort(novel_matrix, k)[:k] #Returns a subarray of k smallest novelty scores
+
+    #Return novelty score as the average Euclidean distance (behavior space) between its k-nearest neighbours
+    return np.sum(k_neigh)/k
+
+def import_arch(seed = 'Evolutionary/seed.json'): #Get model architecture
+    import json
+    from keras.models import model_from_json
+    with open(seed) as json_file:
+        json_data = json.load(json_file)
+    model_arch = model_from_json(json_data)
+    return model_arch
+
+def rec_weakness(setpoints, initial_state, model, n_prev=7, novelty = False, test = False): #Calculates weakness (anti fitness) of RECCURRENT models
+    weakness = np.zeros(19)
+    input = np.reshape(train_data[0:n_prev], (1, n_prev, 21))  #First training example in its entirety
+
+    for example in range(len(train_data)-n_prev):#For all training examples
+        model_out = model.predict(input) #Time domain simulation
+        #Calculate error (weakness)
+        for index in range(19):
+            weakness[index] += math.fabs(model_out[0][index] - train_data[example+n_prev][index])#Time variant simulation
+        #Fill in new input data
+        for k in range(len(model_out)): #Modify the last slot
+            input[0][0][k] = model_out[0][k]
+            input[0][0][k] = model_out[0][k]
+        #Fill in two control variables
+        input[0][0][19] = train_data[example+n_prev][19]
+        input[0][0][20] = train_data[example+n_prev][20]
+        input = np.roll(input, -1, axis=1)  # Track back everything one step and move last one to the last row
+    if (novelty):
+        return weakness
+    elif (test == True):
+        return np.sum(weakness)/(len(train_data)-n_prev)
+    else:
+        return np.sum(np.square(weakness))
+
+def ff_weakness(setpoints, initial_state, simulator, model, novelty = False, test = False, actuator_noise = 0, sensor_noise = 0, sensor_failure = None, actuator_failure = None): #Calculates weakness (anti fitness) of FEED-FORWARD models
+
+    indices = [11,15]
+    weakness = np.zeros(len(indices))
+    # input = np.append(initial_state, setpoints[0])
+    # input = np.reshape(input, (1,23))
+    input = np.copy(initial_state)
+    input[0][19] = setpoints[0][0]
+    input[0][20] = setpoints[0][1]
+
+
+    for example in range(len(setpoints)-1):#For all training examples
+        #Add noise to the state input to the controller
+        noise_input = np.copy(input)
+        if sensor_noise != 0: #Add sensor noise
+            for i in range(19):
+                std = sensor_noise * abs(noise_input[0][i]) / 100.0
+                if std != 0:
+                    noise_input[0][i] +=  np.random.normal(0, std/2.0)
+
+        if sensor_failure != None: #Failed sensor outputs 0 regardless
+            for i in sensor_failure:
+                noise_input[0][i] = 0
+
+        # Get the controller output
+        control_out = model.predict(noise_input)
+
+        #Add actuator noise (controls)
+        if actuator_noise != 0:
+            for i in range(len(control_out[0])):
+                std = actuator_noise * abs(control_out[0][i]) / 100.0
+                if std != 0:
+                    control_out[0][i] +=  np.random.normal(0, std/2.0)
+
+        if actuator_failure != None: #Failed actuator outputs 0 regardless
+            for i in actuator_failure:
+                control_out[0][i] = 0
+
+        # Fill in the controls
+        input[0][19] = control_out[0][0]
+        input[0][20] = control_out[0][1]
+
+        #Use the simulator to get the next state
+        model_out = simulator.predict(input) #Time domain simulation
+        #Calculate error (weakness)
+        for index in range(len(indices)):
+            weakness[index] += math.fabs(model_out[0][indices[index]] - setpoints[example][index])#Time variant simulation
+
+        #Fill in new input data
+        for k in range(len(model_out[0])):
+            input[0][k] = model_out[0][k]
+            input[0][k] = model_out[0][k]
+
+        #Fill in next setpoints
+        input[0][19] = setpoints[example+1][0]
+        input[0][20] = setpoints[example+1][1]
+
+    if (novelty):
+        return weakness
+    elif (test == True):
+        return np.sum(weakness)/(len(setpoints)-1)
+    else:
+        return np.sum(np.square(weakness))

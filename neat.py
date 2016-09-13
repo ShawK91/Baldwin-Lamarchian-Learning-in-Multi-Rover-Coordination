@@ -3,23 +3,26 @@ import MultiNEAT as NEAT
 import mod_rqe as mod, sys
 from random import randint, choice
 
-
+population_size = 10
+use_neat = 1 #Use NEAT VS. Keras based Evolution module
+keras_evo_hidden = 25 #Evo-net hidden nodes
 hidden_nodes = 20  # Simulator hidden nodes (also the input to the Evo-net
 augmented_input = 0
-baldwin =  1
+baldwin =  0
 online_learning = 1
 update_sim = 1
 pre_train = 0
-D_reward = 1 #D reward scheme
+D_reward = 0 #D reward scheme
 sim_all = 1 #Simulator learns to predict the enmtrie state including the POI's
+state_representation = 2 #1 --> Angled brackets, 2--> List of agent/POIs
 
 vizualize = False
-share_sim_subpop = 0 #Share simulator within a sub-population
+share_sim_subpop = 1 #Share simulator within a sub-population
 sensor_avg = True #Average distance as state input vs (min distance by default)
 
 if True:
     params = NEAT.Parameters()
-    params.PopulationSize = 10
+    params.PopulationSize = population_size
     fs_neat = False
     evo_hidden = 0
     params.MinSpecies = 5
@@ -40,21 +43,20 @@ if True:
     params.ActivationFunction_Tanh_Prob = 0.1
     params.ActivationFunction_SignedStep_Prob = 0.1
 
-
 #ROVER DOMAIN MACROS
 if True: #Macros
-    grid_row = 15
-    grid_col = 15
+    grid_row = 10
+    grid_col = 10
     obs_dist = 1 #Observe distance (Radius of POI that agents have to be in for successful observation)
     coupling = 2 #Number of agents required to simultaneously observe a POI
-    total_steps = 30 #Total roaming steps without goal before termination
-    num_agents = 4
-    num_poi = 8
-    angle_res = 30
+    total_steps = 25 #Total roaming steps without goal before termination
+    num_agents = 2
+    num_poi = 2
+    angle_res = 10
 
-    agent_rand = 1
-    poi_rand = 1
-    total_generations = 5000
+    agent_rand = 0
+    poi_rand = 0
+    total_generations = 10000
     wheel_action = 1
     #ABLATION VARS
     if True:
@@ -82,14 +84,8 @@ def reset_board():
     gridworld.reset(agent_rand, poi_rand)
     first_input = []
     for i in range(num_agents):
-        first_input.append(gridworld.get_first_state(i, use_rnn, sensor_avg))
+        first_input.append(gridworld.get_first_state(i, use_rnn, sensor_avg, state_representation))
     return first_input, 0, 0
-
-
-    # if 'action' in locals():
-    #     return action
-    # else:
-    #     return randint(0,4)
 
 # Get rover data for the simulartor
 def get_sim_ae_data(num_rounds):  # Get simulation data
@@ -123,12 +119,12 @@ else:
 class baldwin_util:
     def __init__(self):
         if share_sim_subpop:
-            self.simulator = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, pre_train, train_x, valid_x)
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, middle_layer=True, weights=self.simulator.layers[0].get_weights())
+            self.simulator = mod.init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, pre_train, train_x, valid_x)
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, middle_layer=True, weights=self.simulator.layers[0].get_weights())
         else:
             self.simulator = []
-            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld,  pre_train, train_x, valid_x))  # Create simulator for each agent
-            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, gridworld, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
+            for i in range(params.PopulationSize + 5): self.simulator.append(mod.init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld,  pre_train, train_x, valid_x))  # Create simulator for each agent
+            self.interim_model = mod.init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
         self.traj_x = []; self.traj_y = []  # trajectory for batch learning
         self.best_sim_index = 0
 
@@ -178,77 +174,99 @@ class baldwin_util:
 
 class evo_net():
     def __init__(self, evo_input_size, seed):
-
         if baldwin: self.bald = baldwin_util()
-        g = NEAT.Genome(0, evo_input_size, evo_hidden, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
-                        NEAT.ActivationFunction.UNSIGNED_SIGMOID, seed, params)  # Constructs genome
-        self.pop = NEAT.Population(g, params, True, 1.0, 0)  # Constructs population of genome
-        self.pop.RNG.Seed(0)
-        self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
-        self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
-        self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
-        self.base_mpc = self.pop.GetBaseMPC()
-        self.current_mpc = self.pop.GetCurrentMPC()
-        self.delta_mpc = self.current_mpc - self.base_mpc
-        self.oldest_genome_id = 0
-        self.youngest_genome_id = 0
-        self.delta_age = self.oldest_genome_id - self.youngest_genome_id
-
-
+        if use_neat:
+            g = NEAT.Genome(0, evo_input_size, evo_hidden, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
+                            NEAT.ActivationFunction.UNSIGNED_SIGMOID, seed, params)  # Constructs genome
+            self.pop = NEAT.Population(g, params, True, 1.0, 0)  # Constructs population of genome
+            self.pop.RNG.Seed(0)
+            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+            self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
+            self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
+            self.base_mpc = self.pop.GetBaseMPC()
+            self.current_mpc = self.pop.GetCurrentMPC()
+            self.delta_mpc = self.current_mpc - self.base_mpc
+            self.oldest_genome_id = 0
+            self.youngest_genome_id = 0
+            self.delta_age = self.oldest_genome_id - self.youngest_genome_id
+        else:
+            self.pop = mod.population(evo_input_size, keras_evo_hidden, 5, population_size)
+            self.fitness_evals = [[] for x in xrange(population_size)] #Controls fitnesses calculations through an iteration
+            self.net_list = [[] for x in xrange(population_size)] #Stores the networks for the genomes
 
     def referesh_genome_list(self):
-        self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
-        self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations throug an iteration
-        self.net_list = [[] for x in xrange(len(self.genome_list))]  # Stores the networks for the genomes
+        if use_neat:
+            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+            self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations throug an iteration
+            self.net_list = [[] for x in xrange(len(self.genome_list))]  # Stores the networks for the genomes
+        else: #Keras Evo-net
+            self.fitness_evals = [[] for x in xrange(population_size)]  # Controls fitnesses calculations throug an iteration
+            self.net_list = [[] for x in xrange(population_size)]  # Stores the networks for the genomes
 
     def build_net(self, index):
         if not self.net_list[index]: #if not already built
-            self.net_list[index] = NEAT.NeuralNetwork();
-            self.genome_list[index].BuildPhenotype(self.net_list[index]);
-            self.net_list[index].Flush()  # Build net from genome
+            if use_neat:
+                self.net_list[index] = NEAT.NeuralNetwork();
+                self.genome_list[index].BuildPhenotype(self.net_list[index]);
+                self.net_list[index].Flush()  # Build net from genome
+            else:
+                self.net_list[index] = self.pop.net_pop[int(self.pop.pop_handle[index][0])]
 
     # Get action choice from Evo-net
     def run_evo_net(self, index, state):
-        self.net_list[index].Flush()
-        self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
-        self.net_list[index].Activate()
-        scores = []
-        for i in range(5):
-            if not math.isnan(1 * self.net_list[index].Output()[i]):
-                scores.append(1 * self.net_list[index].Output()[i])
-            else:
-                scores.append(0)
-        #print scores
+        scores = [] #Probability output for five action choices
+        if use_neat:
+            self.net_list[index].Flush()
+            self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
+            self.net_list[index].Activate()
+            for i in range(5):
+                if not math.isnan(1 * self.net_list[index].Output()[i]):
+                    scores.append(1 * self.net_list[index].Output()[i])
+                else:
+                    scores.append(0)
+        else: #Use keras Evo-net
+            #print state.shape
+            state = np.reshape(state, (1, len(state)))
+            scores = self.net_list[index].predict(state)[0]
         if wheel_action and sum(scores) != 0: action = mod.roulette_wheel(scores)
         elif sum(scores) != 0: action = np.argmax(scores)
         else: action = randint(0,4)
         #if action == None: action = randint(0, 4)
+        #print action
         return action
 
     def update_fitness(self): #Update the fitnesses of the genome and also encode the best one for the generation
 
-        ids = []
-        youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
-        best = 0; best_sim_index = 0
-        for i, g in enumerate(self.genome_list):
-            if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
-                avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
-                if avg_fitness > best:
-                    best = avg_fitness;
-                    best_sim_index = i
-                g.SetFitness(avg_fitness) #Update fitness
-                g.SetEvaluated() #Set as evaluated
-                ids.append(g.GetID())
-                if g.GetID() > youngest: youngest = g.GetID();
-                if g.GetID() < oldest: oldest = g.GetID();
+        if use_neat:
+            youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
+            best = 0; best_sim_index = 0
+            for i, g in enumerate(self.genome_list):
+                if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                    avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    if avg_fitness > best:
+                        best = avg_fitness;
+                        best_sim_index = i
+                    g.SetFitness(avg_fitness) #Update fitness
+                    g.SetEvaluated() #Set as evaluated
+                    if g.GetID() > youngest: youngest = g.GetID();
+                    if g.GetID() < oldest: oldest = g.GetID();
+            self.oldest_genome_id = oldest
+            self.youngest_genome_id = youngest
+            self.delta_age = self.youngest_genome_id - self.oldest_genome_id
 
-        #print max(ids) - min(ids)
-        self.oldest_genome_id = oldest
-        self.youngest_genome_id = youngest
-        self.delta_age = self.youngest_genome_id - self.oldest_genome_id
+        else: #Using keras Evo-net
+            best = 0; best_sim_index = 0
+            for i in range(population_size):
+                if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                    avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    #avg_fitness = max(self.fitness_evals[i]) #Use lenient learner #TODO NOTE THIS LENIENCY CHANGE
+                    if avg_fitness > best:
+                        best = avg_fitness; best_sim_index = i
+                    self.pop.pop_handle[i][1] = 1-avg_fitness #Update fitness
+        print best
 
         if baldwin: self.bald.best_sim_index = best_sim_index #Assign the new top simulator #TODO Generalize this to best performing index and ignore if not evaluated
-        self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc #Update MPC's as well
+        if use_neat: self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc #Update MPC's as well
 
 num_evals = 5
 def evolve(all_pop):
@@ -258,8 +276,10 @@ def evolve(all_pop):
     teams = np.zeros(num_agents).astype(int) #Team definitions by index
     selection_pool = [] #Selection pool listing the individuals with multiples for to match number of evaluations
     for i in range(num_agents): #Filling the selection pool
-        selection_pool.append(np.arange(len(all_pop[i].genome_list)))
-        for j in range(num_evals - 1): selection_pool[i] = np.append(selection_pool[i], np.arange(len(all_pop[i].genome_list)))
+        if use_neat: ig_num_individuals = len(all_pop[i].genome_list) #NEAT's number of individuals can change
+        else: ig_num_individuals = population_size #For keras_evo-net the number of individuals stays constant at population size
+        selection_pool.append(np.arange(ig_num_individuals))
+        for j in range(num_evals - 1): selection_pool[i] = np.append(selection_pool[i], np.arange(ig_num_individuals))
 
     for evals in range(params.PopulationSize * num_evals): #For all evaluation cycles
         for i in range(len(teams)): #Pick teams
@@ -267,7 +287,7 @@ def evolve(all_pop):
             teams[i] = selection_pool[i][rand_index] #Pick team member from that index
             selection_pool[i] = np.delete(selection_pool[i], rand_index) #Delete that index
         for i in range(len(teams)): all_pop[i].build_net(teams[i])  # build network for the genomes within the team
-        rewards, global_reward = run_simulation(all_pop, teams) #Returns rewards for each memr of the team
+        rewards, global_reward = run_simulation(all_pop, teams) #Returns rewards for each member of the team
         if global_reward > best_global: best_global = global_reward; #Store the best global performance
         for i, sub_pops in enumerate(all_pop): sub_pops.fitness_evals[teams[i]].append(rewards[i]) #Assign those rewards to the members of the team across the sub-populations
 
@@ -292,7 +312,7 @@ def diff_reward(gridworld):
                 if len(ids) > gridworld.coupling: #Only if it's observed by exactly the numbers needed
                     no_reward = True; break;
             if not no_reward:
-                for agent_id in obs_history[0]: rewards[agent_id] += 1 #Reward the first group of agents to get there
+                for agent_id in obs_history[0]: rewards[agent_id] += 1.0/num_poi #Reward the first group of agents to get there
     return rewards
 
 
@@ -329,7 +349,7 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
 
         #Get new nnstates after all an episode of moves have completed
         for agent_id in range(num_agents):
-            nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg)
+            nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg, state_representation)
         y = sim_input_transform(nn_state[agent_id])
         if baldwin:
             for i in range(len(all_pop)):
@@ -346,9 +366,11 @@ def run_simulation(all_pop, teams): #Run simulation given a team and return fitn
     return rewards, g_reward
 
 def random_baseline():
-    total_trials = 1000
-    g_reward = 0
+    total_trials = 10
+    g_reward = 0.0
     for trials in range(total_trials):
+        best_reward = 0
+        for iii in range(population_size*5):
             nn_state, steps, tot_reward = reset_board()  # Reset board
             for steps in range(total_steps):  # One training episode till goal is not reached
                 all_actions = []  # All action choices from the agents
@@ -359,18 +381,34 @@ def random_baseline():
 
                 # Get new nnstates after all an episode of moves have completed
                 for agent_id in range(num_agents):
-                    nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg)
+                    nn_state[agent_id] = gridworld.get_first_state(agent_id, use_rnn, sensor_avg, state_representation)
                 if gridworld.check_goal_complete(): break
-            g_reward += 100 * sum(gridworld.goal_complete) / num_poi  # Global Reward
+
+            reward = 100 * sum(gridworld.goal_complete) / num_poi  # Global Reward
+            if reward > best_reward: best_reward = reward
+            #End of one full population worth of trial
+        g_reward += best_reward
+
     print 'Random Baseline: ', g_reward/total_trials
 
 
 
 if __name__ == "__main__":
-    #random_baseline()
+    random_baseline()
     mod.dispGrid(gridworld)
     seed = 0 if (evo_hidden == 0) else 1 #Controls sees based on genome initialization
-    evo_input_size = hidden_nodes + num_agents *2 + num_poi *2 if baldwin else num_agents *2 + num_poi *2 #Controls input size to Evo_input
+
+    #Determine Evo-input size
+    if state_representation == 2:
+        if baldwin and augmented_input: evo_input_size = hidden_nodes + num_agents * 2 + num_poi * 2
+        elif baldwin and not augmented_input: evo_input_size = hidden_nodes
+        else: evo_input_size = num_agents * 2 + num_poi * 2 + 5
+    elif state_representation == 1:
+        if baldwin and augmented_input: evo_input_size = hidden_nodes + (360 * 4/angle_res)
+        elif baldwin and not augmented_input: evo_input_size = hidden_nodes
+        else: evo_input_size = (360 * 4/angle_res)  + 5
+
+
     all_pop = [] #Contains all the evo-net populations for all the teams
     for i in range(num_agents): #Spawn populations of team of agents
         all_pop.append(evo_net(evo_input_size, seed))
@@ -380,15 +418,17 @@ if __name__ == "__main__":
     for gen in range (total_generations): #Main Loop
         best_global = evolve(all_pop) #CCEA
         tracker.add_fitness(best_global, gen) #Add best global performance to tracker
-        tracker.add_mpc(all_pop) #Update mpc statistics
-        print 'Gen:', gen, ' Baldwin' if baldwin else ' Darwinian', 'Online' if online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), '+-', int(tracker.mpc_std), ' Delta generations Survival: ',
-        for i in range(num_agents): print all_pop[i].delta_age/params.PopulationSize,
-        print
+
+        if use_neat: tracker.add_mpc(all_pop) #Update mpc statistics
+        if use_neat:
+            print 'Gen:', gen, ' Baldwin' if baldwin else ' Darwinian', 'Online' if online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), '+-', int(tracker.mpc_std), ' Delta generations Survival: ',
+            for i in range(num_agents): print all_pop[i].delta_age / params.PopulationSize,
+            print
+        else:
+            print 'Gen:', gen, ' Baldwin' if baldwin else ' Darwinian', 'Online' if online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta generations Survival: ',
+            for i in range(num_agents): print all_pop[i].pop.longest_survivor,
+            print
         continue
-
-
-
-
 
         #TODO Offline learning
         if not online_learning and baldwin and update_sim: bald.offline_train()

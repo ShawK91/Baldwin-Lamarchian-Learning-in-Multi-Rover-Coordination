@@ -7,69 +7,305 @@ from keras.layers.advanced_activations import SReLU
 from keras.regularizers import l2, activity_l2
 from keras.optimizers import SGD
 import math
+import MultiNEAT as NEAT
 import numpy as np, time
 import random
 
 
+class Baldwin_util:
+    def __init__(self, parameters):
+        self.parameters = parameters
 
-def save_model(model):
-    json_string = model.to_json()
-    open('model_architecture.json', 'w').write(json_string)
-    model.save_weights('shaw_2/model_weights.h5',overwrite=True)
+        #Figure out the prediction modules's input size
+        if parameters.state_representation == 2 or parameters.split_learner:
+            if parameters.sim_all: predictor_input = predictor_input = parameters.num_agents * 2 + parameters.num_poi * 2 + 5
+            else: predictor_input = predictor_input = parameters.num_agents * 2 + 5
 
-class Gridworld:
-    def __init__(self, dim_row = 10, dim_column = 10, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1, coupling = 2):
-        self.observe = 1; self.dim_row = dim_row; self.dim_col = dim_column
-        self.num_agents = num_agents; self.num_poi = num_poi; self.angle_res = angle_res #Angle resolution
-        self.angled_repr = angled_repr #Angled state representation
-        if num_agents > 1: self.coupling = coupling #coupling requirement
-        else: self.coupling = 1
-        self.obs_dist = obs_dist #Observation radius requirements
-        self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
-        self.init_wall()
+        elif parameters.state_representation == 1 and not parameters.split_learner:
+            if parameters.sim_all: predictor_input = (360 / parameters.angle_res) * 4 + 5
+            else: predictor_input = (360 / parameters.angle_res) * 2 + 5
 
-        #Resettable stuff
-        self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
-        self.init_wall()
-        self.poi_pos = []; self.goal_complete = []; self.poi_obs = []
-        for i in range(self.num_poi):
-            self.init_poi(poi_rand) #Initialize POIs
-            self.goal_complete.append(False) #Check if goal is complete
-            self.poi_obs.append([]) #Track the identity of agents within the coupling requirements at all applicable time steps
+        #initiate the prediction module or the population of them
+        if parameters.share_sim_subpop: #One prediction module
+            self.simulator = init_nn(predictor_input, parameters.predictor_hnodes)
+            self.interim_model = init_nn(predictor_input, parameters.predictor_hnodes, middle_layer=True, weights=self.simulator.layers[0].get_weights())
+        else: #Population of prediction modules
+            self.simulator = []
+            for i in range(parameters.population_size + 5): self.simulator.append(init_nn(predictor_input, parameters.predictor_hnodes)) # Create simulator for each agent
+            self.interim_model = init_nn(predictor_input, parameters.predictor_hnodes, middle_layer=True, weights=self.simulator[0].layers[0].get_weights())
+        self.traj_x = []; self.traj_y = []  # trajectory for batch learning
+        self.best_sim_index = 0
 
-        self.agent_pos = []
-        for i in range(self.num_agents):
-            self.init_agent(agent_rand)
-        #self.optimal_steps = self.get_optimal_steps()
-        #self.update_soft_states()
+    #Updates the weight to the interim model
+    def update_interim_model(self, index):
+        #if index < len(self.simulator):
+        if self.parameters.share_sim_subpop: weights = self.simulator.layers[0].get_weights()
+        else: weights = self.simulator[index].layers[0].get_weights()
+        self.interim_model.layers[0].set_weights(weights)
 
-    def init_wall(self):
-        for i in range(self.observe):
-            for x in range(self.state.shape[0]):
-                self.state[x][i] = 3
-                self.state[x][self.state.shape[1] - 1-i] = 3
-            for y in range(self.state.shape[1]):
-                self.state[i][y] = 3
-                self.state[self.state.shape[0] - 1-i][y] = 3
+    # Get the inputs to the Evo-net (extract hidden nodes from the sim-net)
+    def get_evo_input(self, input):  # Extract the hidden layer representatiuon that will be the input to the EvoNet
+        input = self.sim_input_transform(input) #Agent only prediction scheme
+        evo_inp = self.interim_model.predict(input)
+        evo_inp = np.reshape(evo_inp, (len(evo_inp[0])))
+        return evo_inp
 
-    def check_spawn(self, x, y):
-        for i in range(len(self.poi_pos)):
-            if x == self.poi_pos[i][0] and y == self.poi_pos[i][1]:  # Check to see for other POI
-                return False
-        try:
-            for i in range(len(self.agent_pos)):
-                if x == self.agent_pos[i][0] and y == self.agent_pos[i][1]:  # Check to see for other agent
-                    return False
-        except:
-            1 + 1
-        return True
+    def sim_input_transform(self, input):  # Change state input to agent only input
+        if self.parameters.sim_all: return input
+        transformed_inp = []
+        if self.parameters.state_representation == 1 and not self.parameters.split_learner:
+            for i in range(len(input[0])):
+                if i % 4 >= 2 or i >= len(input[0]) - 5:
+                    transformed_inp.append(input[0][i])
+        elif self.parameters.state_representation == 2 or self.parameters.split_learner:
+            for i in range(self.parameters.num_poi * 2, len(input[0])):
+                transformed_inp.append(input[0][i])
 
-    def init_poi(self, rand_start):
-        start = self.observe
-        end = self.state.shape[0] - self.observe-1
-        rad = int(self.dim_row/math.sqrt(3)/2)
-        center = int((start + end)/2)
-        if rand_start:
+        transformed_inp = np.array(transformed_inp)
+        transformed_inp = np.reshape(transformed_inp, (1, len(transformed_inp)))
+        return transformed_inp
+
+    #Train simulator offline at the end
+    def offline_train(self, index):
+        if len(self.traj_x) == 0: return
+        x = np.array(self.traj_x);
+        x = np.reshape(x, (x.shape[0] * x.shape[1], x.shape[2]))
+        y = np.array(self.traj_y);
+        y = np.reshape(y, (y.shape[0] * y.shape[1], y.shape[2]))
+        if self.parameters.share_sim_subpop: self.simulator.fit(x, y, verbose=0, nb_epoch=1)
+        else: self.simulator[index].fit(x, y, verbose=0, nb_epoch=1)
+        #self.update_interim_model()
+        self.traj_x = []; self.traj_y = []
+
+    #Copy the best eprforming candidate's simulator to next generation
+    def port_best_sim(self):
+        w = self.simulator[self.best_sim_index].get_weights()
+        for i in range(len(self.simulator)):
+            self.simulator[i].set_weights(w)
+
+    # LEARNING PART
+    def learning(self, last_state, new_state, index):
+        if self.parameters.online_learning and self.parameters.baldwin and self.parameters.update_sim:
+            x = self.sim_input_transform(last_state)
+            y = self.sim_input_transform(new_state)
+            if self.parameters.share_sim_subpop: self.simulator.fit(x, y, verbose=0, nb_epoch=1)
+            else: self.simulator[index].fit(x, y, verbose=0, nb_epoch=1)
+            self.update_interim_model(index)
+        elif self.parameters.baldwin and self.parameters.update_sim:  # Just append the trajectory
+            x = self.sim_input_transform(last_state)
+            y = self.sim_input_transform(new_state)
+            self.traj_x.append(x)
+            self.traj_y.append(y)
+
+
+
+class Evo_net():
+    def __init__(self, parameters):
+        self.parameters = parameters
+        if parameters.baldwin: self.bald = Baldwin_util(parameters)
+        if parameters.use_neat:
+            seed = 0 if (parameters.params.evo_hidden == 0) else 1  # Controls sees based on genome initialization
+            g = NEAT.Genome(0, parameters.evo_input_size, parameters.params.evo_hidden, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
+                            NEAT.ActivationFunction.UNSIGNED_SIGMOID, seed, parameters.params)  # Constructs genome
+            g.Save('initial')
+            self.pop = NEAT.Population(g, parameters.params, True, 1.0, 0)  # Constructs population of genome
+            self.pop.RNG.Seed(0)
+            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+            self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
+            self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
+            self.base_mpc = self.pop.GetBaseMPC()
+            self.current_mpc = self.pop.GetCurrentMPC()
+            self.delta_mpc = self.current_mpc - self.base_mpc
+            self.oldest_genome_id = 0
+            self.youngest_genome_id = 0
+            self.delta_age = self.oldest_genome_id - self.youngest_genome_id
+        else:
+            self.pop = Population(parameters.evo_input_size, parameters.keras_evonet_hnodes, 5, parameters.population_size)
+            self.fitness_evals = [[] for x in xrange(parameters.population_size)] #Controls fitnesses calculations through an iteration
+            self.net_list = [[] for x in xrange(parameters.population_size)] #Stores the networks for the genomes
+
+    def referesh_genome_list(self):
+        if self.parameters.use_neat:
+            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+            self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations throug an iteration
+            self.net_list = [[] for x in xrange(len(self.genome_list))]  # Stores the networks for the genomes
+        else: #Keras Evo-net
+            self.fitness_evals = [[] for x in xrange(self.parameters.population_size)]  # Controls fitnesses calculations throug an iteration
+            self.net_list = [[] for x in xrange(self.parameters.population_size)]  # Stores the networks for the genomes
+
+
+
+    def build_net(self, index):
+        if not self.net_list[index]: #if not already built
+            if self.parameters.use_neat:
+                self.net_list[index] = NEAT.NeuralNetwork();
+                self.genome_list[index].BuildPhenotype(self.net_list[index]);
+                self.genome_list[index].Save('test')
+                self.net_list[index].Flush()  # Build net from genome
+            else:
+                self.net_list[index] = self.pop.net_pop[int(self.pop.pop_handle[index][0])]
+        #self.net_list[index].Save('a')
+
+
+
+    # Get action choice from Evo-net
+    def run_evo_net(self, index, state):
+        scores = [] #Probability output for five action choices
+        if self.parameters.use_neat:
+            self.net_list[index].Flush()
+            self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
+            self.net_list[index].Activate()
+            for i in range(5):
+                if not math.isnan(1 * self.net_list[index].Output()[i]):
+                    scores.append(1 * self.net_list[index].Output()[i])
+                else:
+                    scores.append(0)
+        else: #Use keras Evo-net
+            state = np.reshape(state, (1, len(state)))
+            scores = self.net_list[index].predict(state)[0]
+        if self.parameters.wheel_action and sum(scores) != 0: action = roulette_wheel(scores)
+        elif sum(scores) != 0: action = np.argmax(scores)
+        else: action = randint(0,4)
+        #if action == None: action = randint(0, 4)
+        #print action
+        return action
+
+    def update_fitness(self): #Update the fitnesses of the genome and also encode the best one for the generation
+        if self.parameters.use_neat:
+            youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
+            best = 0; best_sim_index = 0
+            for i, g in enumerate(self.genome_list):
+                if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                    avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    if avg_fitness > best:
+                        best = avg_fitness;
+                        best_sim_index = i
+                    g.SetFitness(avg_fitness) #Update fitness
+                    g.SetEvaluated() #Set as evaluated
+                    if g.GetID() > youngest: youngest = g.GetID();
+                    if g.GetID() < oldest: oldest = g.GetID();
+            self.oldest_genome_id = oldest
+            self.youngest_genome_id = youngest
+            self.delta_age = self.youngest_genome_id - self.oldest_genome_id
+
+        else: #Using keras Evo-net
+            best = 0; best_sim_index = 0
+            for i in range(self.parameters.population_size):
+                if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                    if self.parameters.keras_evonet_leniency: avg_fitness = max(self.fitness_evals[i]) #Use lenient learner
+                    else: avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    if avg_fitness > best:
+                        best = avg_fitness; best_sim_index = i
+                    self.pop.pop_handle[i][1] = 1-avg_fitness #Update fitness
+        #print best
+
+        if self.parameters.baldwin: self.bald.best_sim_index = best_sim_index #Assign the new top simulator #TODO Generalize this to best performing index and ignore if not evaluated
+        if self.parameters.use_neat: self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc #Update MPC's as well
+
+class Agent:
+    def __init__(self, grid, parameters):
+        self.parameters = parameters
+        self.position = self.init_agent(grid)
+        self.action = 0
+        self.evo_net = Evo_net(parameters)
+        self.perceived_state = None #State of the gridworld as perceived by the agent
+        self.split_learner_state = None #Useful for split learner
+
+
+    def init_agent(self, grid):
+        start = grid.observe;  end = grid.state.shape[0] - grid.observe - 1
+        rad = int(grid.dim_row / math.sqrt(3) / 3)
+        center = int((start + end) / 2)
+        if grid.agent_rand:
+            while True:
+                x = randint(center - rad, center + rad)
+                y = randint(center - rad, center + rad)
+                if grid.state[x][y] != 1: #position not already occupied
+                    break
+        else:  # Not random
+            trial = 0
+            while True:
+                while True:
+                    x = center - rad + (trial % (rad*2))
+                    if x <= center + rad: break #If within limits
+                while True:
+                    y = center - rad + (trial / (rad*2))
+                    if y <= center + rad: break #If within limits
+
+                if grid.state[x][y] != 1: #position not already occupied
+                    break
+                trial+=1
+
+        grid.state[x][y] = 1  # Agent Code
+        return [x, y]
+
+    def reset(self, grid):
+        self.position = self.init_agent(grid)
+
+    def take_action(self, net_id):
+        #Modify state input to required input format
+        if self.parameters.baldwin:
+            if self.parameters.split_learner: padded_state = self.pad_state(self.split_learner_state)
+            else: padded_state = self.pad_state(self.perceived_state)
+            evo_input = self.evo_net.bald.get_evo_input(padded_state)  # Hidden nodes from simulator
+            if self.parameters.augmented_input:
+                #if self.parameters.split_learner: evo_input = np.append(evo_input, self.split_learner_state.flatten())  # Augment input with state info
+                evo_input = np.append(evo_input, self.perceived_state.flatten())  # Augment input with state info
+        else: #Darwin
+            if self.parameters.split_learner:
+                evo_input = np.append(self.perceived_state, self.split_learner_state)
+                #evo_input = np.reshape(self.perceived_state, (self.perceived_state.shape[1]))
+            else:
+                evo_input = np.reshape(self.perceived_state, (self.perceived_state.shape[1]))  # State input only (Strictly Darwinian approach)
+        self.action = self.evo_net.run_evo_net(net_id, evo_input) #Take action
+
+    def referesh(self, net_id, grid):
+        if not self.parameters.baldwin: #In case of Darwin
+            self.perceived_state = grid.get_state(self)  # Update all agent's perceived state
+            return
+        else: #Baldwin
+            if self.parameters.split_learner: #If split learning
+                x = self.split_learner_state;
+                self.perceived_state = grid.get_state(self)  # Update all agent's perceived state
+                self.split_learner_state = grid.get_state(self, 2)  # Update all agent's perceived state
+                y = self.split_learner_state;
+            else: #If no split learning
+                x = self.perceived_state;
+                self.perceived_state = grid.get_state(self)  # Update all agent's perceived state
+                y = self.perceived_state;
+
+            if self.parameters.update_sim: #Learning part
+                x = self.pad_state(x);
+                y = self.pad_state(y)  # Pad state
+                x[0][len(x[0]) - 5 + self.action] = 1  # Encode action taken
+                self.evo_net.bald.learning(x, y, net_id)
+
+
+    def ready_for_simulation(self, net_id):
+        if self.parameters.online_learning and self.parameters.baldwin:  # Update interim model belonging to the teams[i] indexed individual in the ith sub-population
+            self.evo_net.bald.update_interim_model(net_id)
+
+    def pad_state(self, state):
+        state = np.append(state, 0)  # Add action to the state
+        state = np.append(state, 0)  # Add action to the state
+        state = np.append(state, 0)  # Add action to the state
+        state = np.append(state, 0)  # Add action to the state
+        state = np.append(state, 0)  # Add action to the state
+        state = np.reshape(state, (1, len(state)))
+        return state
+
+
+class POI:
+    def __init__(self, grid):
+        self.position = self.init_poi(grid) #Initialize POI object
+        self.is_observed = False #Check if goal is complete
+        self.observation_history = [] #Track the identity of agents within the coupling requirements at all applicable time steps
+
+    def init_poi(self, grid):
+        start = grid.observe; end = grid.state.shape[0] - grid.observe - 1
+        rad = int(grid.dim_row / math.sqrt(3) / 2)
+        center = int((start + end) / 2)
+        if grid.poi_rand:
             while True:
                 rand = random.random()
                 if rand < 0.25:
@@ -84,71 +320,90 @@ class Gridworld:
                 else:
                     x = randint(center - rad, center + rad)
                     y = randint(center + rad + 1, end)
-                if self.check_spawn(x, y):
+                if grid.state[x][y] != 2: #Position not already occupied
                     break
 
-        else:
-            x = self.state.shape[0] - self.observe-1 ;y = self.state.shape[1] - self.observe-1 #Goals at ends
-            #x = self.state.shape[0]/2 + 1 ;y = self.state.shape[1]/2 #Goals in middle
-            if len(self.poi_pos) > 0:
-                x = self.observe ;
-                y = self.state.shape[1] - self.observe - 1
-                # for i in range(len(self.poi_pos)):
-                #     if x == self.poi_pos[i][0] and y == self.poi_pos[i][1]:  # Check to see for other agent
-                #         y = self.state.shape[0] - self.observe - 2
-                #         x = self.observe + 1
-        self.state[x][y] = 2
-        self.poi_pos.append([x, y])
-        return [x,y]
-
-    def init_agent(self, rand_start):
-        start = self.observe
-        end = self.state.shape[0] - self.observe-1
-        rad = int(self.dim_row/math.sqrt(3)/3)
-        center = int((start + end)/2)
-        if rand_start:
-            while True:
-                x = randint(center - rad, center + rad)
-                y = randint(center - rad, center + rad)
-                if self.check_spawn(x, y):
+        else: #Pre-defined starting positions
+            trial = 0
+            while True: #unoccuped
+                k = len(grid.poi_list)
+                region = trial % 4 #4 distinct regions of distribution
+                access = trial / 4 #Access number
+                if region == 0:
+                    x = start + (access * 2) % (center - rad - 1 - start)
+                    y = start + (access * 2) % (end - start)
+                elif region == 1:
+                    x = start + (access * 2) % (end - center - rad - 1)
+                    y = end - (access * 2) % (end - start)
+                elif region == 2:
+                    x = end - (access * 2) % (2 * rad)
+                    y = start + (access * 2) % (center - rad - 1 - start)
+                else:
+                    x = end - (access * 2) % (2 * rad)
+                    y = end - (access * 2) % (end - center - rad - 1)
+                if grid.state[x][y] != 2: #Position not already occupied
                     break
-        else: #Not random
-            while True:
-                if len(self.agent_pos) == 0:
-                    x = start; y = start
-                if len(self.agent_pos) == 1:
-                    x = start + (end - start) / 2; y = start
-                if len(self.agent_pos) == 2:
-                    x = end; y = start
-                if len(self.agent_pos) > 2:
-                    x = start + len(self.agent_pos); y = start
-                for i in range(len(self.agent_pos)):
-                    if x == self.agent_pos[i][0] and y == self.agent_pos[i][1]:  # Check to see for other POIs
-                        continue
-                break
-        self.state[x][y] = 1 #Agent Code
-        self.agent_pos.append([x,y])
+                trial += 1
+
+
+
+
+
+        grid.state[x][y] = 2
+        #grid.poi_pos.append([x, y])
         return [x,y]
 
-    def reset(self, agent_rand, poi_rand):
+
+
+    def reset(self, grid):
+        self.position = self.init_poi(grid)
+        self.is_observed = False
+        self.observation_history = []
+
+class Gridworld:
+    def __init__(self, parameters):
+        self.parameters = parameters
+        self.observe = 1; self.dim_row = parameters.grid_row; self.dim_col = parameters.grid_col; self.poi_rand = parameters.poi_random; self.agent_rand = parameters.agent_random
+        self.num_agents = parameters.num_agents; self.num_poi = parameters.num_poi; self.angle_res = parameters.angle_res #Angle resolution
+        self.coupling = parameters.coupling #coupling requirement
+        self.obs_dist = parameters.obs_dist #Observation radius requirements
+
+        #Resettable stuff
+        self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
+        self.init_wall() #initialize wall
+
+        self.poi_list = [] #List of POI objects
+        for i in range(self.num_poi):
+            self.poi_list.append(POI(self))
+
+        self.agent_list = []
+        for i in range(self.num_agents): self.agent_list.append(Agent(self, parameters))
+
+
+    def init_wall(self):
+        for i in range(self.observe):
+            for x in range(self.state.shape[0]):
+                self.state[x][i] = 3
+                self.state[x][self.state.shape[1] - 1-i] = 3
+            for y in range(self.state.shape[1]):
+                self.state[i][y] = 3
+                self.state[self.state.shape[0] - 1-i][y] = 3
+
+    def reset(self, teams):
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
-        self.poi_pos = []; self.goal_complete = []; self.poi_obs = []
-        for i in range(self.num_poi):
-            self.init_poi(poi_rand) #Initialize POIs
-            self.goal_complete.append(False) #Check if goal is complete
-            self.poi_obs.append([]) #Track the identity of agents within the coupling requirements at all applicable time steps
+        for agent_id, agent in enumerate(self.agent_list):
+            agent.reset(self)
+            agent.ready_for_simulation(teams[agent_id])  # Get all agents ready by updating interim model if necesary
+            if not self.parameters.online_learning: #Offline learning
+                agent.evo_net.bald.offline_train(teams[agent_id])
 
-        self.agent_pos = []
-        for i in range(self.num_agents):
-            self.init_agent(agent_rand)
-        #self.optimal_steps = self.get_optimal_steps()
-        #self.update_soft_states()
+        for poi in self.poi_list: poi.reset(self)
 
-    def move(self, all_actions):
-        for agent_id in range(self.num_agents): #Move all agents (first agent has priority in case of conflict)
-            action = all_actions[agent_id]
-            next_pos = np.copy(self.agent_pos[agent_id])
+    def move(self):
+        for agent in self.agent_list: #Move and agent
+            action = agent.action
+            next_pos = np.copy(agent.position)
             if action == 1: next_pos[1] += 1  # Right
             elif action == 2: next_pos[0] += 1  # Down
             elif action == 3: next_pos[1] -= 1  # Left
@@ -156,209 +411,153 @@ class Gridworld:
 
             # Computer reward and check illegal moves
             x = next_pos[0]; y = next_pos[1]
-            if self.state[x][y] == 3: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] # Wall
-            if self.state[x][y] == 1 and action != 0: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] # Other Agent
-            if self.state[x][y] == 2 and action != 0: next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1] #POI
+            if self.state[x][y] == 3: next_pos = np.copy(agent.position) #Reset if hit wall
+            if self.state[x][y] == 1 or self.state[x][y] == 2 and action != 0: next_pos = np.copy(agent.position) #Reset if other Agent or POI and action != 0
 
             # Update gridworld and agent position
-            if self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] != 2:
-                self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] = 0
-            if self.state[next_pos[0]][next_pos[1]]!= 2:
-                self.state[next_pos[0]][next_pos[1]] = 1
-            self.agent_pos[agent_id][0] = next_pos[0]
-            self.agent_pos[agent_id][1] = next_pos[1]
+            self.state[agent.position[0]][agent.position[1]] = 0 #Encode newly freed position in the state template
+            self.state[next_pos[0]][next_pos[1]] = 1 #Encode newly occupied position in the state template
+            agent.position[0] = next_pos[0]; agent.position[1] = next_pos[1] #Update new positions for the agent object
 
-    def update_poi_observations(self):
-        #Check for credit assignment
-        for poi_id in range(self.num_poi): # POI COUPLED
-            soft_stat = []
-            for ag in range(self.num_agents):
-                if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist: # and self.goal_complete[poi_id] == False:
-                    soft_stat.append(ag)
-            if len(soft_stat) >= self.coupling: #If coupling requirement is met
-                self.goal_complete[poi_id] = True
-                self.poi_obs[poi_id].append(soft_stat) #Store the identity of agents aiding in meeting that tight coupling requirement
-
-        # for poi_id in range(self.num_poi): # POI COUPLED
-        #     if self.goal_complete[poi_id] == False:
-        #         try:
-        #             self.poi_soft_status[poi_id].remove(agent_id)
-        #         except: 1+1
-        #         if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
-        #             self.poi_soft_status[poi_id].append(agent_id)
-        #         if len(self.poi_soft_status[poi_id]) >= self.coupling:
-        #             self.goal_complete[poi_id] = True
-
-    def update_soft_states(self): #Reset soft states
-        self.poi_soft_status = [] #Reset soft_status
-        for i in range(self.num_poi):
-            self.poi_soft_status.append([])
-        for poi_id in range(self.num_poi): # POI COUPLED
-            for ag in range(self.num_agents):
-                if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
-                    self.poi_soft_status[poi_id].append(ag)
-
-    def get_state(self, agent_id, sensor_avg, state_representation):  # Returns a flattened array around the agent position
-        if self.angled_repr: #If state representation uses angle
-            st = self.angled_state(agent_id, sensor_avg, state_representation)
-            st = np.append(st, 0) #Add action to the state
-            st = np.append(st, 0)  # Add action to the state
-            st = np.append(st, 0)  # Add action to the state
-            st = np.append(st, 0)  # Add action to the state
-            st = np.append(st, 0)  # Add action to the state
-            st = np.reshape(st, (1,len(st)))
-            return st
-        else: #DEPRECATED - IGNORE (BINARY ENCODING REPRESENTATION)
-            x_beg = self.agent_pos[agent_id][0] - self.observe
-            y_beg = self.agent_pos[agent_id][1] - self.observe
-            x_end = self.agent_pos[agent_id][0] + self.observe + 1
-            y_end = self.agent_pos[agent_id][1] + self.observe + 1
-            st = np.copy(self.state)
-            st = st[x_beg:x_end, :]
-            st = st[:, y_beg:y_end]
-            st = np.reshape(st, (1, pow(self.observe * 2 + 1, 2))) # Flatten array
-            #return st
-            k = np.reshape(np.zeros(len(st[0]) * 4), (len(st[0]), 4)) #4-bit encoding
-            for i in range(len(st[0])):
-                k[i][int(st[0][i])] = 1
-            k = np.reshape(k, (1, len(st[0]) * 4))  # Flatten array
-
-            return k
-
-    def get_first_state(self, agent_id, use_rnn, sensor_avg, state_representation):  # Get first state, action input to the q_net
-        if not use_rnn: #Normal NN
-            st = self.get_state(agent_id, sensor_avg, state_representation)
-            return st
-
-        rnn_state = []
-        st = self.get_state(agent_id)
-        for time in range(3):
-            rnn_state.append(st)
-        rnn_state = np.array(rnn_state)
-        rnn_state = np.reshape(rnn_state, (1, rnn_state.shape[0], rnn_state.shape[2]))
-        return rnn_state
-
-    def referesh_state(self, current_state, agent_id, use_rnn):
-        st = self.get_state(agent_id)
-        if use_rnn:
-            new_state = np.roll(current_state, -1, axis=1)
-            new_state[0][2] = st
-            return new_state
-        else:
-            return st
-
-    def check_goal_complete(self):
-        goal_complete = True #Check if all agents found POI's
-        for poi_id in range(self.num_poi):
-            goal_complete *= self.goal_complete[poi_id]
-        return  goal_complete
-
-    def get_optimal_steps(self):
-        #TODO MAKE MATCHING GENERALIZABLE
-        return self.dim_col + self.dim_row
-        steps = []
-        for i in range(self.num_poi):
-            ig = []
-            for agent_id in range(self.num_agents):
-                ig.append(abs(self.poi_pos[i][0] - self.agent_pos[agent_id][0]) + abs(self.poi_pos[i][1] - self.agent_pos[agent_id][1]))
-            steps.append(ig)
-        opt_steps = 10000000000
-        for i in range(self.num_poi):
-            for j in range(self.num_poi):
-                step = steps[j]
-
-                # if abs(self.poi_pos[i][0] - self.agent_pos[agent_id][0]) + abs(self.poi_pos[i][1] - self.agent_pos[agent_id][1])  > opt_steps:
-                #     opt_steps = abs(self.poi_pos[0] - self.agent_pos[agent_id][0]) + abs(self.poi_pos[1] - self.agent_pos[agent_id][1])
-        return opt_steps
-
-    def get_angle_dist(self, x1, y1, x2, y2):  # Computes angles and distance between two agents relative to (1,0) vector (x-axis)
-        dot = x2 * x1 + y2 * y1  # dot product
-        det = x2 * y1 - y2 * x1  # determinant
-        angle = math.atan2(det, dot)  # atan2(y, x) or atan2(sin, cos)
-        #angle = math.degrees(angle)
-        dist = x1 * x1 + y1 * y1
-        dist = math.sqrt(dist)
-        return angle, dist
-
-    def angled_state(self, agent_id, sensor_avg, state_representation):
-        if state_representation == 2: #List agent/POI representation fully obserbavle
-            state = np.zeros(self.num_agents *2 + self.num_poi *2)
-            if sensor_avg: #Average distance
-                dist_poi_list = [[] for x in xrange(360/self.angle_res)]
-                dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
-
-            for id in range(self.num_poi):
-                if True: #self.goal_complete[id] == False: #For all POI's that are still active
-                    x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
-                    y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
-                    angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                    state[2*id] = angle
-                    state[2*id+1] = dist/(2.0*self.dim_col)
-
-            for id in range(self.num_agents):
-                if id != agent_id: #FOR ALL AGENTS MINUS MYSELF
-                    x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0]; x2 = 1
-                    y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1]; y2 = 0
-                    angle, dist = self.get_angle_dist(x1,y1,x2,y2)
-                    state[2*self.num_poi+2 * id] = angle
-                    state[2*self.num_poi + 2 * id + 1] = dist / (2.0 * self.dim_col)
-            state = np.reshape(state, (1, self.num_agents *2 + self.num_poi *2)) #Flatten array
-
-        if state_representation == 1: #Angle brackets
+    def get_state(self, agent, state_representation = None):  # Returns a flattened array around the agent position
+        if state_representation == None: state_representation = self.parameters.state_representation #If no override use choice in parameters
+        if state_representation == 1:  # Angle brackets
             state = np.zeros(((360 / self.angle_res), 4))
-            if sensor_avg:  # Average distance
+            if self.parameters.sensor_avg:  # Average distance
                 dist_poi_list = [[] for x in xrange(360 / self.angle_res)]
                 dist_agent_list = [[] for x in xrange(360 / self.angle_res)]
 
-            for id in range(self.num_poi):
-                if self.goal_complete[id] == False:  # For all POI's that are still active
-                    x1 = self.poi_pos[id][0] - self.agent_pos[agent_id][0];
-                    x2 = 1
-                    y1 = self.poi_pos[id][1] - self.agent_pos[agent_id][1];
+            for poi in self.poi_list:
+                if not poi.is_observed:  # For all POI's that are still active
+                    x1 = poi.position[0] - agent.position[0];
+                    x2 = -1
+                    y1 = poi.position[1] - agent.position[1];
                     y2 = 0
                     angle, dist = self.get_angle_dist(x1, y1, x2, y2)
-                    bracket = int(angle / self.angle_res)
+                    bracket = int(angle / self.angle_res);
                     state[bracket][0] += 1.0 / self.num_poi  # Add POIs
-                    if sensor_avg:
+                    if self.parameters.sensor_avg:
                         dist_poi_list[bracket].append(dist / (2.0 * self.dim_col))
                     else:  # Min distance
                         if state[bracket][1] > dist / (2.0 * self.dim_col) or state[bracket][
                             1] == 0:  # Update min distance from POI
                             state[bracket][1] = dist / (2.0 * self.dim_col)
 
-            for id in range(self.num_agents):
-                if id != agent_id:  # FOR ALL AGENTS MINUS MYSELF
-                    x1 = self.agent_pos[id][0] - self.agent_pos[agent_id][0];
-                    x2 = 1
-                    y1 = self.agent_pos[id][1] - self.agent_pos[agent_id][1];
+            for other_agent in self.agent_list:
+                if other_agent != agent:  # FOR ALL AGENTS MINUS MYSELF
+                    x1 = other_agent.position[0] - agent.position[0];
+                    x2 = -1
+                    y1 = other_agent.position[1] - agent.position[1];
                     y2 = 0
                     angle, dist = self.get_angle_dist(x1, y1, x2, y2)
                     bracket = int(angle / self.angle_res)
                     state[bracket][2] += 1.0 / (self.num_agents - 1)  # Add agent
-                    if sensor_avg:
+                    if self.parameters.sensor_avg:
                         dist_agent_list[bracket].append(dist / (2.0 * self.dim_col))
                     else:  # Min distance
                         if state[bracket][3] > dist / (2.0 * self.dim_col) or state[bracket][
                             3] == 0:  # Update min distance from other agent
                             state[bracket][3] = dist / (2.0 * self.dim_col)
 
-            if sensor_avg:
+            if self.parameters.sensor_avg:
                 for bracket in range(len(dist_agent_list)):
-
-                    try:
-                        state[bracket][1] = sum(dist_poi_list[bracket]) / len(
-                            dist_poi_list[bracket])  # Encode average POI distance
-                    except:
-                        None
-                    try:
-                        state[bracket][3] = sum(dist_agent_list[bracket]) / len(
-                            dist_agent_list[bracket])  # Encode average POI distance
-                    except:
-                        None
-
+                    try: state[bracket][1] = sum(dist_poi_list[bracket]) / len(dist_poi_list[bracket])  # Encode average POI distance
+                    except: None
+                    try: state[bracket][3] = sum(dist_agent_list[bracket]) / len(dist_agent_list[bracket])  # Encode average agent distance
+                    except: None
             state = np.reshape(state, (1, 360 / self.angle_res * 4))  # Flatten array
 
+        if state_representation == 2:  # List agent/POI representation fully obserbavle
+            state = np.zeros(self.num_agents * 2 + self.num_poi * 2)
+            for id, poi in enumerate(self.poi_list):
+                if True: #not poi.is_observed:  # For all POI's that are still active
+                    x1 = poi.position[0] - agent.position[0];
+                    x2 = -1
+                    y1 = poi.position[1] - agent.position[1];
+                    y2 = 0
+                    angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+                    state[2 * id] = angle / 360.0
+                    state[2 * id + 1] = dist / (2.0 * self.dim_col)
+
+            for id, other_agent in enumerate(self.agent_list):
+                if other_agent != agent:  # FOR ALL AGENTS MINUS MYSELF
+                    x1 = other_agent.position[0] - agent.position[0];
+                    x2 = -1
+                    y1 = other_agent.position[1] - agent.position[1];
+                    y2 = 0
+                    angle, dist = self.get_angle_dist(x1, y1, x2, y2)
+                    state[2 * self.num_poi + 2 * id] = angle /360.0
+                    state[2 * self.num_poi + 2 * id + 1] = dist / (2.0 * self.dim_col)
+            state = np.reshape(state, (1, self.num_agents * 2 + self.num_poi * 2))  # Flatten array
+
+        if state_representation == 3:  # Binary state representation
+            x_beg = self.agent_pos[agent_id][0] - self.observe
+            y_beg = self.agent_pos[agent_id][1] - self.observe
+            x_end = self.agent_pos[agent_id][0] + self.observe + 1
+            y_end = self.agent_pos[agent_id][1] + self.observe + 1
+            state = np.copy(self.state)
+            state = state[x_beg:x_end, :]
+            state = state[:, y_beg:y_end]
+            state = np.reshape(state, (1, pow(self.observe * 2 + 1, 2)))  # Flatten array
+            k = np.reshape(np.zeros(len(state[0]) * 4), (len(state[0]), 4))  # 4-bit encoding
+            for i in range(len(state[0])):
+                k[i][int(state[0][i])] = 1
+            k = np.reshape(k, (1, len(state[0]) * 4))  # Flatten array
         return state
+
+
+
+    def get_angle_dist(self, x1, y1, x2, y2):  # Computes angles and distance between two agents relative to (1,0) vector (x-axis)
+        dot = x2 * x1 + y2 * y1  #dot product
+        det = x2 * y1 - y2 * x1  # determinant
+        angle = math.atan2(det, dot)  # atan2(y, x) or atan2(sin, cos)
+        angle = math.degrees(angle) + 180.0 + 270.0
+        angle = angle % 360
+        dist = x1 * x1 + y1 * y1
+        dist = math.sqrt(dist)
+        return angle, dist
+
+    def update_poi_observations(self):
+        # Check for credit assignment
+        for poi in self.poi_list:  # POI COUPLED
+            soft_stat = []
+            for agent_id, agent in enumerate(self.agent_list):
+                if abs(poi.position[0] - agent.position[0]) <= self.obs_dist and abs(
+                            poi.position[1] - agent.position[1]) <= self.obs_dist:  # and self.goal_complete[poi_id] == False:
+                    soft_stat.append(agent_id)
+            if len(soft_stat) >= self.coupling:  # If coupling requirement is met
+                poi.is_observed = True
+                poi.observation_history.append(soft_stat)  # Store the identity of agents aiding in meeting that tight coupling requirement
+
+    def check_goal_complete(self):
+        is_complete = True
+        for poi in self.poi_list:
+            is_complete *= poi.is_observed
+        return is_complete
+
+    def get_reward(self):
+        global_reward = 0 #Global reward obtained
+        for poi in self.poi_list: global_reward += 1.0 * poi.is_observed
+        global_reward /= self.parameters.num_poi #Scale between 0 and 1
+
+        rewards = np.zeros(self.parameters.num_agents) #Rewards decomposed to the team
+        if self.parameters.D_reward: #Difference reward scheme
+            for poi in self.poi_list:
+                if poi.is_observed:
+                    no_reward = False
+                    for ids in poi.observation_history:
+                        if len(ids) > self.parameters.coupling:  # Only if it's observed by exactly the numbers needed
+                            no_reward = True;
+                            break;
+                    if not no_reward:
+                        for agent_id in poi.observation_history[0]:
+                            rewards[agent_id] += 1.0 / self.parameters.num_poi  # Reward the first group of agents to get there
+        else:
+            rewards += global_reward  # Global reward scheme
+
+        return rewards, global_reward
+
+
 
 class statistics(): #Tracker
     def __init__(self):
@@ -374,9 +573,9 @@ class statistics(): #Tracker
         if generation % 10 == 0: #Save to csv file
             self.save_csv(generation)
 
-    def add_mpc(self, all_pop):
-        all_mpc = np.zeros(len(all_pop))
-        for i, sub_pop in enumerate(all_pop): all_mpc[i] = sub_pop.delta_mpc
+    def add_mpc(self, gridworld, parameters):
+        all_mpc = np.zeros(parameters.num_agents)
+        for id, agent in enumerate(gridworld.agent_list): all_mpc[id] = agent.evo_net.delta_mpc
         self.avg_mpc = np.average(all_mpc) #Average mpc
         self.mpc_std = np.std(all_mpc)
 
@@ -385,12 +584,8 @@ class statistics(): #Tracker
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
-class prettyfloat(float):
-    def __repr__(self):
-        return "%0.2f" % self
-
-class population():
-    def __init__(self, input_size, hidden_nodes, output, population_size, elite_fraction = 0.1):
+class Population():
+    def __init__(self, input_size, hidden_nodes, output, population_size, elite_fraction = 0.2):
         self.population_size = population_size
         self.elite_fraction = int(elite_fraction * population_size)
         self.net_pop = [] #List of networks
@@ -400,7 +595,6 @@ class population():
         for x in range(population_size):  self.pop_handle[x][0] = x #Initializing our net population indexing
         self.longest_survivor = 0
         self.best_net_index = 0 #Current index of the best net
-
 
 
     def init_net(self, input_size, hidden_nodes, output):
@@ -419,7 +613,7 @@ class population():
             self.longest_survivor = 0; self.best_net_index = int(self.pop_handle[0][0])
         self.best_net_index = self.pop_handle[0][0] #Update the leader candidate
         for x in range(self.elite_fraction, self.population_size): #Mutate to renew population
-            many = 1; much = randint(1,10)
+            many = randint(1,5); much = randint(1,10)
             if (randint(1,100) == 91):
                 many = randint(1,10); much = randint(1,100)
             self.mutate(self.net_pop[int(self.pop_handle[x][0])], self.net_pop[int(self.pop_handle[x][0])], many, much) #Mutate same model in and out
@@ -447,41 +641,16 @@ class population():
 
 
 
-def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len = 3, design = 1):
-    model = Sequential()
-    if angled_repr:
-        sa_sp = (360/angle_res) * 4
-    else:
-        sa_sp = (pow(gridworld.observe * 2 + 1,2)*4) #BIT ENCODING
-    if design == 1:
-        model.add(LSTM(hidden_nodes, init= 'he_uniform', return_sequences=False, input_shape=(hist_len, sa_sp), inner_init='orthogonal', forget_bias_init='one', inner_activation='sigmoid'))#, activation='sigmoid', inner_activation='hard_sigmoid'))
-    elif design == 2:
-        model.add(SimpleRNN(hidden_nodes, init='he_uniform', input_shape=(hist_len, sa_sp), inner_init='orthogonal'))
-    elif design == 3:
-        model.add(GRU(hidden_nodes, init='he_uniform', consume_less= 'cpu',  input_shape=(hist_len, sa_sp),inner_init='orthogonal'))
-    #model.add(Dropout(0.1))
-    #model.add(LeakyReLU(alpha=.2))
-    model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
-    #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
-    #model.add(Activation('sigmoid'))
-    #model.add(BatchNormalization())
-    #model.add(Activation('relu'))
-    model.add(Dense(1, init= 'he_uniform'))
-    model.compile(loss='mse', optimizer='Nadam')
-    return model
 
-def init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, pretrain=False, train_x = 0, valid_x = 0, middle_layer = False, weights = 0):
+
+def init_nn(input_size, hidden_nodes, middle_layer = False, weights = 0):
     model = Sequential()
-    if state_representation == 2:
-        sa_sp = gridworld.num_agents * 2 + gridworld.num_poi * 2 + 5
-    elif state_representation == 1:
-        if sim_all: sa_sp = (360/angle_res) * 4 + 5
-        else: sa_sp = (360/angle_res) * 2 + 5
+
 
     if middle_layer:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
+        model.add(Dense(hidden_nodes, input_dim=input_size, weights=weights, W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     else:
-        model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform', W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
+        model.add(Dense(hidden_nodes, input_dim=input_size, init='he_uniform', W_regularizer=l2(0.01), activity_regularizer=activity_l2(0.01)))
     #model.add(LeakyReLU(alpha=.2))
     #model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
     model.add(Activation('sigmoid'))
@@ -489,13 +658,12 @@ def init_nn(hidden_nodes, angle_res, sim_all, state_representation, gridworld, p
     #model.add(Activation('sigmoid'))
     sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
     if not middle_layer:
-        model.add(Dense(sa_sp, init= 'he_uniform'))
+        model.add(Dense(input_size, init= 'he_uniform')) #Output of the prediction module
     model.compile(loss='mse', optimizer=sgd)
 
-    if pretrain: #Autoencoder pretraining
-        model.fit(train_x, train_x, nb_epoch=50, batch_size=32, shuffle=True, validation_data=(valid_x, valid_x),
-                        verbose=1)
-
+    # if pretrain: #Autoencoder pretraining
+    #     model.fit(train_x, train_x, nb_epoch=50, batch_size=32, shuffle=True, validation_data=(valid_x, valid_x),
+    #                     verbose=1)
     return model
 
 def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=True, ipython_client=None):
@@ -532,17 +700,7 @@ def dev_EvaluateGenomeList_Parallel(genome_list, evaluator, cores=4, display=Tru
 
     return fitnesses
 
-def q_values(hist_input, q_model):
-    # action_ind = hist_input.shape[2] - 1
-    # for i in range(5):
-    #     k[i][2][action_ind] = i
-    return q_model.predict(hist_input)
 
-def test_hist(q_model):
-    gridworld = Gridworld()
-    agent2 = Agent(gridworld, True)
-    hist_input = get_first_hist(gridworld, agent2)
-    return q_model.predict(hist_input)
 
 def dispGrid(gridworld, state = None, full=True, agent_id = None):
 
@@ -584,63 +742,33 @@ def dispGrid(gridworld, state = None, full=True, agent_id = None):
         print '\t'
 
 
-def bck_dispGrid(gridworld, state = None, full=True, agent_id = None):
-
-    if state == None: #Given agentq
-        if full:
-            st = np.copy(gridworld.state)
-        else:
-            x_beg = gridworld.agent_pos[agent_id][0] - gridworld.observe
-            y_beg = gridworld.agent_pos[agent_id][1] - gridworld.observe
-            x_end = gridworld.agent_pos[agent_id][0] + gridworld.observe + 1
-            y_end = gridworld.agent_pos[agent_id][1] + gridworld.observe + 1
-            st = np.copy(gridworld.state)
-            st = st[x_beg:x_end,:]
-            st = st[:,y_beg:y_end]
+def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, sim_all, hist_len = 3, design = 1):
+    model = Sequential()
+    if angled_repr:
+        sa_sp = (360/angle_res) * 4
     else:
-        st = []
-        print len(state)
-        row_leng = int(math.sqrt(len(state)))
-        for i in range(row_leng):
-            ig = []
-            for j in range(row_leng):
-                ig.append(state[i*row_leng + j])
-            st.append(ig)
+        sa_sp = (pow(gridworld.observe * 2 + 1,2)*4) #BIT ENCODING
+    if design == 1:
+        model.add(LSTM(hidden_nodes, init= 'he_uniform', return_sequences=False, input_shape=(hist_len, sa_sp), inner_init='orthogonal', forget_bias_init='one', inner_activation='sigmoid'))#, activation='sigmoid', inner_activation='hard_sigmoid'))
+    elif design == 2:
+        model.add(SimpleRNN(hidden_nodes, init='he_uniform', input_shape=(hist_len, sa_sp), inner_init='orthogonal'))
+    elif design == 3:
+        model.add(GRU(hidden_nodes, init='he_uniform', consume_less= 'cpu',  input_shape=(hist_len, sa_sp),inner_init='orthogonal'))
+    #model.add(Dropout(0.1))
+    #model.add(LeakyReLU(alpha=.2))
+    model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
+    #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    #model.add(Activation('sigmoid'))
+    #model.add(BatchNormalization())
+    #model.add(Activation('relu'))
+    model.add(Dense(1, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer='Nadam')
+    return model
 
-    grid = [["-" for i in range(len(st))] for i in range(len(st))]
-    grid[0][0] = "o"
-    for i in range(len(st)):
-        for j in range(len(st)):
-            if st[i][j] == 2:
-                grid[i][j] = '$'
-            if st[i][j] == 1:
-                grid[i][j] = '*'
-            if st[i][j] == 3:
-                grid[i][j] = '#'
-    for row in grid:
-        for e in row:
-            print e,
-        print
-
-def test_q_table(q_table, gridworld, agent1):
-    steps = 0
-    tot_reward = 0
-    while True:  # Till goal is not reached
-        steps += 1
-        table_pos = [agent1.position[0] - gridworld.observe,
-                     agent1.position[1] - gridworld.observe]  # Transform to work q-table
-        action = np.argmax(q_table[table_pos[0]][[table_pos[1]]])
-        # Get Reward and move
-        reward = move_and_get_reward(gridworld, agent1, action)
-        tot_reward += reward
-
-        if gridworld.poi_pos[0] == agent1.position[0] and gridworld.poi_pos[1] == agent1.position[1]:  # IF POI is met
-            break
-        if steps > 100:
-            break
-    return tot_reward, steps
-
-
+def save_model(model):
+    json_string = model.to_json()
+    open('model_architecture.json', 'w').write(json_string)
+    model.save_weights('shaw_2/model_weights.h5',overwrite=True)
 
 def load_model_architecture(seed='Models/architecture.json'):  # Get model architecture
     import yaml
@@ -663,8 +791,6 @@ def save_model_architecture(qmodel, foldername = '/Models/'):
     yaml_string = qmodel.to_yaml()
     output_stream = open("Models/architecture.yaml", "w")
     yaml.dump(yaml_string, output_stream)#, default_flow_style=False)
-
-
 
 
 def load_model(foldername = 'Models/'):
@@ -957,3 +1083,28 @@ def ff_weakness(setpoints, initial_state, simulator, model, novelty = False, tes
         return np.sum(weakness)/(len(setpoints)-1)
     else:
         return np.sum(np.square(weakness))
+
+
+def get_first_state(self, agent_id, use_rnn, sensor_avg,
+                    state_representation):  # Get first state, action input to the q_net
+    if not use_rnn:  # Normal NN
+        st = self.get_state(agent_id, sensor_avg, state_representation)
+        return st
+
+    rnn_state = []
+    st = self.get_state(agent_id)
+    for time in range(3):
+        rnn_state.append(st)
+    rnn_state = np.array(rnn_state)
+    rnn_state = np.reshape(rnn_state, (1, rnn_state.shape[0], rnn_state.shape[2]))
+    return rnn_state
+
+
+def referesh_state(self, current_state, agent_id, use_rnn):
+    st = self.get_state(agent_id)
+    if use_rnn:
+        new_state = np.roll(current_state, -1, axis=1)
+        new_state[0][2] = st
+        return new_state
+    else:
+        return st

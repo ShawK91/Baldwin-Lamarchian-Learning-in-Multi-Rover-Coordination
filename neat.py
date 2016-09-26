@@ -5,14 +5,14 @@ from random import randint, choice
 
 class Parameters:
     def __init__(self):
-        self.population_size = 10
+        self.population_size = 3
         self.predictor_hnodes = 20  # Prediction module hidden nodes (also the input to the Evo-net)
         self.augmented_input = 1
         self.baldwin = 0
         self.online_learning = 1
         self.update_sim = 1
         self.pre_train = 0
-        self.D_reward = 1  # D reward scheme
+        self.D_reward = 0  # D reward scheme
         self.sim_all = 0  # Simulator learns to predict the enmtrie state including the POI's
         self.share_sim_subpop = 1  # Share simulator within a sub-population
         self.sensor_avg = True  # Average distance as state input vs (min distance by default)
@@ -26,16 +26,19 @@ class Parameters:
         self.coupling = 1  # Number of agents required to simultaneously observe a POI
         self.total_steps = 20 # Total roaming steps without goal before termination
         self.num_agents = 2
-        self.num_poi = 8
+        self.num_poi = 4
         self.angle_res = 90
         self.agent_random = 0
         self.poi_random = 0
         self.total_generations = 10000
-        self.wheel_action = 1
+        self.wheel_action = 0
 
         self.use_rnn = 0  # Use recurrent instead of normal network
         self.success_replay = False
         self.vizualize = False
+        self.is_halloffame = 1
+        self.hof_weight = 0.5
+        self.leniency = 1
 
         # Determine Evo-input size
 
@@ -71,7 +74,7 @@ class Parameters:
         self.params = NEAT.Parameters()
         self.params.PopulationSize = self.population_size
         self.params.fs_neat = 0
-        self.params.evo_hidden = 1
+        self.params.evo_hidden = 0
         self.params.MinSpecies = 5
         self.params.MaxSpecies = 10
         self.params.EliteFraction = 0.05
@@ -79,9 +82,9 @@ class Parameters:
         self.params.RecurrentLoopProb = 0.2
 
         self.params.MaxWeight = 8
-        self.params.MutateAddNeuronProb = 0#0.01
-        self.params.MutateAddLinkProb = 0#0.05
-        self.params.MutateRemLinkProb = 0#0.01
+        self.params.MutateAddNeuronProb = 0.01
+        self.params.MutateAddLinkProb = 0.05
+        self.params.MutateRemLinkProb = 0.01
         self.params.MutateRemSimpleNeuronProb = 0.005
         self.params.MutateNeuronActivationTypeProb = 0.005
 
@@ -93,11 +96,6 @@ class Parameters:
 parameters = Parameters() #Create the Parameters class
 tracker = mod.statistics() #Initiate tracker
 gridworld = mod.Gridworld (parameters)  # Create gridworld
-
-
-
-
-
 
 # # Get rover data for the simulartor
 # def get_sim_ae_data(num_rounds):  # Get simulation data
@@ -128,7 +126,8 @@ gridworld = mod.Gridworld (parameters)  # Create gridworld
 #     train_x = 0; valid_x = 0
 
 num_evals = 5
-def evolve(gridworld, parameters):
+def evolve(gridworld, parameters, hof_score):
+    best_team = None
     best_global = 0
     #NOTE: ALL keyword means all sub-populations
     for i in range(parameters.num_agents): gridworld.agent_list[i].evo_net.referesh_genome_list() #get new genome list and fitness evaluations trackers
@@ -147,13 +146,43 @@ def evolve(gridworld, parameters):
             selection_pool[i] = np.delete(selection_pool[i], rand_index) #Delete that index
         for i in range(len(teams)): gridworld.agent_list[i].evo_net.build_net(teams[i])  # build network for the genomes within the team
         rewards, global_reward = run_simulation(parameters, gridworld, teams) #Returns rewards for each member of the team
-        if global_reward > best_global: best_global = global_reward; #Store the best global performance
+        if global_reward > best_global:
+            best_global = global_reward; #Store the best global performance
+            best_team = np.copy(teams) #Store the best team
+
         for id, agent in enumerate(gridworld.agent_list): agent.evo_net.fitness_evals[teams[id]].append(rewards[id]) #Assign those rewards to the members of the team across the sub-populations
+
+    if parameters.is_halloffame: #HAll of Fame
+        if gridworld.agent_list[0].evo_net.hof != None: #Quit first time (special case for first run)
+            for sub_pop, agent in enumerate(gridworld.agent_list):  # For each agent population
+                for index in range(len(gridworld.agent_list[sub_pop].evo_net.genome_list)): #Each individual in an agent sub-population
+                    rewards, global_reward = run_simulation(parameters, gridworld, teams=None, hof_run=True, hof_sub_pop_id=sub_pop, hof_ag_index=index)
+                    agent.evo_net.hof_fitness_evals[index].append(rewards[sub_pop]) #Assign hof scores
+                    if global_reward > best_global:
+                        best_global = global_reward;  # Store the best global performance
+                        if best_global > hof_score:
+                            agent.evo_net.hof = agent.evo_net.net_list[index] #Update the HOF team
+                            print 'HOF CHANGE', global_reward
+
+
+
+
+
+
+
 
     for agent in gridworld.agent_list:
         agent.evo_net.update_fitness()# Assign fitness to genomes
-        agent.evo_net.pop.Epoch() #Epoch update method inside NEAT
+        #agent.evo_net.pop.Epoch() #Epoch update method inside NEAT
         if parameters.baldwin and parameters.update_sim and not parameters.share_sim_subpop: agent.evo_net.bald.port_best_sim()  # Deep copy best simulator
+
+    if parameters.is_halloffame and best_global > hof_score: #Hall of fame-new team found
+        for i in range(len(best_team)):
+            gridworld.agent_list[i].evo_net.hof = gridworld.agent_list[i].evo_net.net_list[best_team[i]]
+            print 'HOF changed', hof_score, gridworld.agent_list[i].evo_net.hof
+
+
+
     return best_global
 
 
@@ -163,20 +192,30 @@ def evolve(gridworld, parameters):
 
 
 
-def run_simulation(parameters, gridworld, teams): #Run simulation given a team and return fitness for each individuals in that team
-    gridworld.reset(teams)  # Reset board
+def run_simulation(parameters, gridworld, teams, hof_run = False, hof_sub_pop_id = None, hof_ag_index = None): #Run simulation given a team and return fitness for each individuals in that team
+    gridworld.reset(teams, hof_run, hof_sub_pop_id, hof_ag_index)  # Reset board
 
     for steps in range(parameters.total_steps):  # One training episode till goal is not reached
         for id, agent in enumerate(gridworld.agent_list):  #get all the action choices from the agents
             if steps == 0: agent.perceived_state = gridworld.get_state(agent) #Update all agent's perceived state
             if steps == 0 and parameters.split_learner: agent.split_learner_state = gridworld.get_state(agent, 2) #If split learner
-            agent.take_action(teams[id]) #Make the agent take action using the Evo-net with given id from the population
+            if hof_run and id != hof_sub_pop_id: #Hall of Fame run minus the one population being tested
+                agent.take_action(None, hof_run)
+            elif hof_run: agent.take_action(hof_ag_index, False) #For hof_run for the evaluated individual
+            else: agent.take_action(teams[id], hof_run) #Make the agent take action using the Evo-net with given id from the population
 
         gridworld.move() #Move gridworld
         gridworld.update_poi_observations() #Figure out the POI observations and store all credit information
 
+        learn_activate = True
         for id, agent in enumerate(gridworld.agent_list):
-            agent.referesh(teams[id], gridworld) #Update state and learn if applicable
+            if not hof_run: agent.referesh(teams[id], gridworld) #Update state and learn if applicable
+            else:
+                if id == hof_sub_pop_id: agent.referesh(None, gridworld)  # Update state and learn if applicable
+                else: agent.referesh(None, gridworld, learn_activate=False)
+
+
+
 
         if gridworld.check_goal_complete(): break #If all POI's observed
 
@@ -214,20 +253,28 @@ def random_baseline():
 if __name__ == "__main__":
     #random_baseline()
     mod.dispGrid(gridworld)
+    hof_score = 0
 
 
 
 
     for gen in range (parameters.total_generations): #Main Loop
+
+
         curtime = time.time()
 
-        best_global = evolve(gridworld, parameters) #CCEA
+        best_global = evolve(gridworld, parameters, hof_score) #CCEA
+        if best_global > hof_score: hof_score = best_global
         tracker.add_fitness(best_global, gen) #Add best global performance to tracker
+        _, hof_reward = tracker.run_hof_simulation(parameters, gridworld)
+        print hof_reward
+
 
         if parameters.use_neat: tracker.add_mpc(gridworld, parameters) #Update mpc statistics
         elapsed = time.time() - curtime
+        continue
         if parameters.use_neat:
-            print 'Gen:', gen, ' Baldwin' if parameters.baldwin else ' Darwinian', 'Online' if parameters.online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), '+-', int(tracker.mpc_std), 'Elapsed Time: ', elapsed #' Delta generations Survival: '      #for i in range(num_agents): print all_pop[i].delta_age / params.PopulationSize,
+            print 'Gen:', gen, ' Baldwin' if parameters.baldwin else ' Darwinian', 'Online' if parameters.online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta MPC:', int(tracker.avg_mpc), '+-', int(tracker.mpc_std), 'Elapsed Time: ', elapsed, 'Best HOF: ', hof_score #' Delta generations Survival: '      #for i in range(num_agents): print all_pop[i].delta_age / params.PopulationSize,
             #print
         else:
             print 'Gen:', gen, ' Baldwin' if parameters.baldwin else ' Darwinian', 'Online' if parameters.online_learning else 'Offline', ' Best g_reward', int(best_global * 100), ' Avg:', int(100 * tracker.avg_fitness), ' Delta generations Survival: '

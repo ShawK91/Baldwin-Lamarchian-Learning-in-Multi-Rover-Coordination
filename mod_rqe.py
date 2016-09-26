@@ -102,6 +102,7 @@ class Baldwin_util:
 class Evo_net():
     def __init__(self, parameters):
         self.parameters = parameters
+        if parameters.is_halloffame: self.hof = None #Hall of Famer
         if parameters.baldwin: self.bald = Baldwin_util(parameters)
         if parameters.use_neat:
             seed = 0 if (parameters.params.evo_hidden == 0) else 1  # Controls sees based on genome initialization
@@ -112,6 +113,7 @@ class Evo_net():
             self.pop.RNG.Seed(0)
             self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
             self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
+            self.hof_fitness_evals = [[] for x in xrange(len(self.genome_list))]
             self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
             self.base_mpc = self.pop.GetBaseMPC()
             self.current_mpc = self.pop.GetCurrentMPC()
@@ -122,17 +124,19 @@ class Evo_net():
         else:
             self.pop = Population(parameters.evo_input_size, parameters.keras_evonet_hnodes, 5, parameters.population_size)
             self.fitness_evals = [[] for x in xrange(parameters.population_size)] #Controls fitnesses calculations through an iteration
+            self.hof_fitness_evals = [[] for x in xrange(len(self.genome_list))]
             self.net_list = [[] for x in xrange(parameters.population_size)] #Stores the networks for the genomes
 
     def referesh_genome_list(self):
         if self.parameters.use_neat:
             self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
             self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations throug an iteration
+            self.hof_fitness_evals = [[] for x in xrange(len(self.genome_list))]
             self.net_list = [[] for x in xrange(len(self.genome_list))]  # Stores the networks for the genomes
         else: #Keras Evo-net
             self.fitness_evals = [[] for x in xrange(self.parameters.population_size)]  # Controls fitnesses calculations throug an iteration
             self.net_list = [[] for x in xrange(self.parameters.population_size)]  # Stores the networks for the genomes
-
+            self.hof_fitness_evals = [[] for x in xrange(len(self.genome_list))]
 
 
     def build_net(self, index):
@@ -149,15 +153,23 @@ class Evo_net():
 
 
     # Get action choice from Evo-net
-    def run_evo_net(self, index, state):
+    def run_evo_net(self, index, state, hof_run ):
         scores = [] #Probability output for five action choices
         if self.parameters.use_neat:
-            self.net_list[index].Flush()
-            self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
-            self.net_list[index].Activate()
+            if hof_run:
+                self.hof.Flush()
+                self.hof.Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
+                self.hof.Activate()
+                net_out = self.hof.Output()
+            else:
+                self.net_list[index].Flush()
+                self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
+                self.net_list[index].Activate()
+                net_out = self.net_list[index].Output()
+
             for i in range(5):
-                if not math.isnan(1 * self.net_list[index].Output()[i]):
-                    scores.append(1 * self.net_list[index].Output()[i])
+                if not math.isnan(1 * net_out[i]):
+                    scores.append(1 * net_out[i])
                 else:
                     scores.append(0)
         else: #Use keras Evo-net
@@ -176,10 +188,16 @@ class Evo_net():
             best = 0; best_sim_index = 0
             for i, g in enumerate(self.genome_list):
                 if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
-                    avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    if self.parameters.leniency: avg_fitness = max(self.fitness_evals[i]) #Leniency
+                    else: avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
+                    if self.parameters.is_halloffame and len(self.hof_fitness_evals[0]) != 0: #Hall of fame fitness adjustments (minus first time
+                        avg_fitness = (1.0 - self.parameters.hof_weight) * avg_fitness + self.parameters.hof_weight * self.hof_fitness_evals[i][0]
+
+
+                    #print self.fitness_evals[i], self.hof_fitness_evals[i]
                     if avg_fitness > best:
-                        best = avg_fitness;
-                        best_sim_index = i
+                        best = avg_fitness; best_sim_index = i
+
                     g.SetFitness(avg_fitness) #Update fitness
                     g.SetEvaluated() #Set as evaluated
                     if g.GetID() > youngest: youngest = g.GetID();
@@ -242,7 +260,7 @@ class Agent:
     def reset(self, grid):
         self.position = self.init_agent(grid)
 
-    def take_action(self, net_id):
+    def take_action(self, net_id, hof_run=False):
         #Modify state input to required input format
         if self.parameters.baldwin:
             if self.parameters.split_learner: padded_state = self.pad_state(self.split_learner_state)
@@ -257,9 +275,10 @@ class Agent:
                 #evo_input = np.reshape(self.perceived_state, (self.perceived_state.shape[1]))
             else:
                 evo_input = np.reshape(self.perceived_state, (self.perceived_state.shape[1]))  # State input only (Strictly Darwinian approach)
-        self.action = self.evo_net.run_evo_net(net_id, evo_input) #Take action
+        if hof_run: self.action = self.evo_net.run_evo_net(net_id, evo_input, hof_run)
+        else: self.action = self.evo_net.run_evo_net(net_id, evo_input, hof_run) #Take action
 
-    def referesh(self, net_id, grid):
+    def referesh(self, net_id, grid, learn_activate=True):
         if not self.parameters.baldwin: #In case of Darwin
             self.perceived_state = grid.get_state(self)  # Update all agent's perceived state
             return
@@ -278,7 +297,7 @@ class Agent:
                 x = self.pad_state(x);
                 y = self.pad_state(y)  # Pad state
                 x[0][len(x[0]) - 5 + self.action] = 1  # Encode action taken
-                self.evo_net.bald.learning(x, y, net_id)
+                if learn_activate: self.evo_net.bald.learning(x, y, net_id)
 
 
     def ready_for_simulation(self, net_id):
@@ -389,16 +408,23 @@ class Gridworld:
                 self.state[i][y] = 3
                 self.state[self.state.shape[0] - 1-i][y] = 3
 
-    def reset(self, teams):
+    def reset(self, teams, hof_run = False, hof_sub_pop_id = None, hof_net_id = None, test_run = False):
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
-        for agent_id, agent in enumerate(self.agent_list):
-            agent.reset(self)
-            agent.ready_for_simulation(teams[agent_id])  # Get all agents ready by updating interim model if necesary
-            if not self.parameters.online_learning: #Offline learning
-                agent.evo_net.bald.offline_train(teams[agent_id])
-
         for poi in self.poi_list: poi.reset(self)
+        if test_run: return
+
+        for agent_id, agent in enumerate(self.agent_list):
+            if not hof_run or agent_id == hof_sub_pop_id: #If the hof agent to be tested (- the hof team)
+                agent.reset(self)
+                if hof_run:net_index = hof_net_id
+                else: net_index = teams[agent_id]
+
+                agent.ready_for_simulation(net_index)  # Get all agents ready by updating interim model if necesary
+                if not self.parameters.online_learning: #Offline learning
+                    agent.evo_net.bald.offline_train(net_index)
+
+
 
     def move(self):
         for agent in self.agent_list: #Move and agent
@@ -563,6 +589,7 @@ class statistics(): #Tracker
     def __init__(self):
         self.fitnesses = []; self.avg_fitness = 0; self.tr_avg_fit = []
         self.avg_mpc = 0; self.tr_avg_mpc = []; self.mpc_std = []; self.tr_mpc_std = []
+        self.hof_reward = []
 
 
     def add_fitness(self, fitness, generation):
@@ -583,6 +610,30 @@ class statistics(): #Tracker
     def save_csv(self, generation):
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
+
+    def run_hof_simulation(self, parameters, gridworld):  # Run simulation given a team and return fitness for each individuals in that team
+        gridworld.reset(teams = None, test_run = True)  # Reset board
+
+        for steps in range(parameters.total_steps):  # One training episode till goal is not reached
+            for id, agent in enumerate(gridworld.agent_list):  # get all the action choices from the agents
+                if steps == 0: agent.perceived_state = gridworld.get_state(agent)  # Update all agent's perceived state
+                if steps == 0 and parameters.split_learner: agent.split_learner_state = gridworld.get_state(agent,
+                                                                                                            2)  # If split learner
+                agent.take_action(None, hof_run=True)
+
+
+            gridworld.move()  # Move gridworld
+            gridworld.update_poi_observations()  # Figure out the POI observations and store all credit information
+
+            learn_activate = True
+            for agent in gridworld.agent_list:
+                    agent.referesh(None, gridworld, learn_activate=False)
+            if gridworld.check_goal_complete(): break  # If all POI's observed
+
+        rewards, global_reward = gridworld.get_reward()
+        self.hof_reward.append(global_reward)
+        return rewards, global_reward
+
 
 class Population():
     def __init__(self, input_size, hidden_nodes, output, population_size, elite_fraction = 0.2):

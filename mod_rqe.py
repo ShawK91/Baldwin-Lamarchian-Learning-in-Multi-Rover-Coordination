@@ -1,7 +1,7 @@
 
 from random import randint
 from keras.models import Sequential
-from keras.layers import Dense, Dropout, Activation
+from keras.layers import Dense, Activation
 from keras.layers import LSTM, GRU, SimpleRNN
 from keras.layers.advanced_activations import SReLU
 from keras.regularizers import l2, activity_l2
@@ -10,6 +10,200 @@ import math
 import MultiNEAT as NEAT
 import numpy as np, time
 import random
+import pickle
+import neat as py_neat
+from neat import nn
+
+
+class PyNeat_Config_object(object):
+    allowed_connectivity = ['unconnected', 'fs_neat', 'fully_connected', 'partial']
+
+    def __init__(self, parameters):
+        from neat.reproduction import DefaultReproduction
+        from neat.stagnation import DefaultStagnation
+        from neat.genes import NodeGene, ConnectionGene
+        from neat.genome import Genome, FFGenome
+        from neat import activation_functions
+
+        self.registry = {'DefaultStagnation': DefaultStagnation,
+                         'DefaultReproduction': DefaultReproduction}
+        self.type_config = {}
+
+        # Phenotype configuration
+        self.input_nodes = parameters.evo_input_size
+        self.output_nodes = 5
+        self.hidden_nodes = parameters.py_neat_config.hidden_nodes
+        self.initial_connection = parameters.py_neat_config.initial_connection
+        self.connection_fraction = None
+        self.max_weight = parameters.py_neat_config.max_weight
+        self.min_weight = parameters.py_neat_config.min_weight
+        self.feedforward = parameters.py_neat_config.feedforward
+        self.weight_stdev = parameters.py_neat_config.weight_stdev
+        self.activation_functions = parameters.py_neat_config.activation_functions.strip().split()
+
+        # Verify that initial connection type is valid.
+        if 'partial' in self.initial_connection:
+            c, p = self.initial_connection.split()
+            self.initial_connection = c
+            self.connection_fraction = float(p)
+            if not (0 <= self.connection_fraction <= 1):
+                raise Exception("'partial' connection value must be between 0.0 and 1.0, inclusive.")
+
+        assert self.initial_connection in self.allowed_connectivity
+
+        # Verify that specified activation functions are valid.
+        for fn in self.activation_functions:
+            if not activation_functions.is_valid(fn):
+                raise Exception("Invalid activation function name: {0!r}".format(fn))
+
+        # Select a genotype class.
+        if self.feedforward:
+            self.genotype = FFGenome
+        else:
+            self.genotype = Genome
+
+        # Genetic algorithm configuration
+        self.pop_size = parameters.population_size
+        self.max_fitness_threshold = parameters.py_neat_config.max_fitness_threshold
+        self.prob_add_conn = parameters.py_neat_config.prob_add_conn
+        self.prob_add_node = parameters.py_neat_config.prob_add_node
+        self.prob_delete_conn = parameters.py_neat_config.prob_delete_conn
+        self.prob_delete_node = parameters.py_neat_config.prob_delete_node
+        self.prob_mutate_bias = parameters.py_neat_config.prob_mutate_bias
+        self.bias_mutation_power = parameters.py_neat_config.bias_mutation_power
+        self.prob_mutate_response = parameters.py_neat_config.prob_mutate_response
+        self.response_mutation_power = parameters.py_neat_config.response_mutation_power
+        self.prob_mutate_weight = parameters.py_neat_config.prob_mutate_weight
+        self.prob_replace_weight = parameters.py_neat_config.prob_replace_weight
+        self.weight_mutation_power = parameters.py_neat_config.weight_mutation_power
+        self.prob_mutate_activation = parameters.py_neat_config.prob_mutate_activation
+        self.prob_toggle_link = parameters.py_neat_config.prob_toggle_link
+        self.reset_on_extinction = bool(parameters.py_neat_config.reset_on_extinction)
+
+        # genotype compatibility
+        self.compatibility_threshold = parameters.py_neat_config.compatibility_threshold
+        self.excess_coefficient = parameters.py_neat_config.excess_coefficient
+        self.disjoint_coefficient = parameters.py_neat_config.disjoint_coefficient
+        self.weight_coefficient = parameters.py_neat_config.weight_coefficient
+
+        # Gene types
+        self.node_gene_type = NodeGene
+        self.conn_gene_type = ConnectionGene
+
+        # Default stagnation
+        self.species_fitness_func = parameters.py_neat_config.species_fitness_func
+        self.max_stagnation = parameters.py_neat_config.max_stagnation
+
+        # Default Reporoduction
+        self.elitism = parameters.py_neat_config.elitism
+        self.survival_threshold = parameters.py_neat_config.survival_threshold
+
+        stagnation_type_name = parameters.py_neat_config.stagnation_type
+        reproduction_type_name = parameters.py_neat_config.reproduction_type
+
+        if stagnation_type_name not in self.registry:
+            raise Exception('Unknown stagnation type: {!r}'.format(stagnation_type_name))
+        self.stagnation_type = self.registry[stagnation_type_name]
+
+        self.type_config[stagnation_type_name] = [
+            ('species_fitness_func', parameters.py_neat_config.species_fitness_func),
+            ('max_stagnation ', parameters.py_neat_config.max_stagnation)]
+
+        if reproduction_type_name not in self.registry:
+            raise Exception('Unknown reproduction type: {!r}'.format(reproduction_type_name))
+        self.reproduction_type = self.registry[reproduction_type_name]
+        self.type_config[reproduction_type_name] = [('elitism', parameters.py_neat_config.elitism), (
+        'survival_threshold', parameters.py_neat_config.survival_threshold)]
+
+        # Gather statistics for each generation.
+        self.collect_statistics = True
+        # Show stats after each generation.
+        self.report = True
+        # Save the best genome from each generation.
+        self.save_best = True
+        # Time in minutes between saving checkpoints, None for no timed checkpoints.
+        self.checkpoint_time_interval = 30
+        # Time in generations between saving checkpoints, None for no generational checkpoints.
+        self.checkpoint_gen_interval = 100
+
+    def register(self, typeName, typeDef):
+        """
+        User-defined classes mentioned in the config file must be provided to the
+        configuration object before the load() method is called.
+        """
+        self.registry[typeName] = typeDef
+
+    def get_type_config(self, typeInstance):
+        return dict(self.type_config[typeInstance.__class__.__name__])
+
+class PyNeat_handler():
+    def __init__(self, parameters):
+        self.pyNeat_config_object = PyNeat_Config_object(parameters)
+
+
+    def get_genomes(self, pop):
+        genomes = []
+        for s in pop.species.species:
+            genomes.extend(s.members)
+        return genomes
+
+
+
+
+    def epoch(self, pop, genomes):
+
+        """
+        The user-provided fitness_function should take one argument, a list of all genomes in the population,
+        and its return value is ignored.  This function is free to maintain external state, perform evaluations
+        in parallel, and probably any other thing you want.  The only requirement is that each individual's
+        fitness member must be set to a floating point value after this function returns.
+        It is assumed that fitness_function does not modify the list of genomes, or the genomes themselves, apart
+        from updating the fitness member.
+        """
+        pop.generation += 1
+        pop.reporters.start_generation(pop.generation)
+        pop.total_evaluations += len(genomes)
+
+        # Gather and report statistics.
+        best = max(genomes)
+        pop.reporters.post_evaluate(genomes, pop.species.species, best)
+
+        # Save the best genome from the current generation if requested.
+        if pop.config.save_best:
+            with open('best_genome', 'wb') as f:
+                pickle.dump(best, f)
+
+        # Save if the fitness threshold is reached.
+        if best.fitness >= pop.config.max_fitness_threshold:
+            pop.reporters.found_solution(pop.generation, best)
+            with open('solution_genome', 'wb') as f:
+                pickle.dump(best, f)
+
+        # Create the next generation from the current generation.
+        new_population = pop.reproduction.reproduce(pop.species, pop.config.pop_size)
+
+        # Check for complete extinction
+        if not pop.species.species:
+            pop.reporters.complete_extinction()
+
+            # If requested by the user, create a completely new population,
+            # otherwise raise an exception.
+            if pop.config.reset_on_extinction:
+                new_population = pop.reproduction.create_new(pop.config.pop_size)
+            else:
+                print 'Extinction'
+
+        # Update species age.
+        for s in pop.species.species:
+            s.age += 1
+
+        # Divide the new population into species.
+        pop.species.speciate(new_population)
+
+        if pop.config.checkpoint_gen_interval is not None and pop.generation % pop.config.checkpoint_gen_interval == 0:
+            pop.save_checkpoint(checkpoint_type="generation")
+
+        pop.reporters.end_generation()
 
 
 class Baldwin_util:
@@ -97,36 +291,57 @@ class Baldwin_util:
             self.traj_x.append(x)
             self.traj_y.append(y)
 
-
-
 class Evo_net():
     def __init__(self, parameters):
         self.parameters = parameters
         if parameters.baldwin: self.bald = Baldwin_util(parameters)
         if parameters.use_neat:
-            seed = 0 if (parameters.params.evo_hidden == 0) else 1  # Controls sees based on genome initialization
-            g = NEAT.Genome(0, parameters.evo_input_size, parameters.params.evo_hidden, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
-                            NEAT.ActivationFunction.UNSIGNED_SIGMOID, seed, parameters.params)  # Constructs genome
-            g.Save('initial')
-            self.pop = NEAT.Population(g, parameters.params, True, 1.0, 0)  # Constructs population of genome
-            self.pop.RNG.Seed(0)
-            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
-            self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
-            self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
-            self.base_mpc = self.pop.GetBaseMPC()
-            self.current_mpc = self.pop.GetCurrentMPC()
-            self.delta_mpc = self.current_mpc - self.base_mpc
-            self.oldest_genome_id = 0
-            self.youngest_genome_id = 0
-            self.delta_age = self.oldest_genome_id - self.youngest_genome_id
+            if parameters.use_py_neat: #Python implementation of NEAT
+                from neat import population, nn#, statistics, visualize, config
+                self.pyneat_handler = PyNeat_handler(self.parameters) #Make the pyNeat_handler object
+                pyneat_config = self.pyneat_handler.pyNeat_config_object #Import the configurations
+                self.pop = population.Population(pyneat_config, use_config_override=True)
+                self.genome_list = self.pyneat_handler.get_genomes(self.pop)
+                self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
+                self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
+
+            else:
+                seed = 0 if (parameters.params.evo_hidden == 0) else 1  # Controls sees based on genome initialization
+                g = NEAT.Genome(0, parameters.evo_input_size, parameters.params.evo_hidden, 5, False, NEAT.ActivationFunction.UNSIGNED_SIGMOID,
+                                NEAT.ActivationFunction.UNSIGNED_SIGMOID, seed, parameters.params)  # Constructs genome
+                g.Save('initial')
+                self.pop = NEAT.Population(g, parameters.params, True, 1.0, 0)  # Constructs population of genome
+                self.pop.RNG.Seed(0)
+                self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+                self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations through an iteration
+                self.net_list = [[] for x in xrange(len(self.genome_list))] #Stores the networks for the genomes
+                self.base_mpc = self.pop.GetBaseMPC()
+                self.current_mpc = self.pop.GetCurrentMPC()
+                self.delta_mpc = self.current_mpc - self.base_mpc
+                self.oldest_genome_id = 0
+                self.youngest_genome_id = 0
+                self.delta_age = self.oldest_genome_id - self.youngest_genome_id
         else:
             self.pop = Population(parameters.evo_input_size, parameters.keras_evonet_hnodes, 5, parameters.population_size)
             self.fitness_evals = [[] for x in xrange(parameters.population_size)] #Controls fitnesses calculations through an iteration
             self.net_list = [[] for x in xrange(parameters.population_size)] #Stores the networks for the genomes
 
+
+    def epoch(self): #Method to complete epoch after fitness has been assigned to the genomes
+        if self.parameters.use_py_neat: #Python based NEAT use Epoch method written outside
+            self.pyneat_handler.epoch(self.pop, self.genome_list)
+        else: #For C++ NEAT and Keras based Evonet, use inbuilt method
+            self.pop.Epoch()  # Epoch update method inside NEAT and Keras
+
+
+
+
     def referesh_genome_list(self):
         if self.parameters.use_neat:
-            self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
+            if self.parameters.use_py_neat: #Python implementation of NEAT
+                self.genome_list = self.pyneat_handler.get_genomes(self.pop)
+            else:
+                self.genome_list = NEAT.GetGenomeList(self.pop) #List of genomes in this subpopulation
             self.fitness_evals = [[] for x in xrange(len(self.genome_list))] #Controls fitnesses calculations throug an iteration
             self.net_list = [[] for x in xrange(len(self.genome_list))]  # Stores the networks for the genomes
         else: #Keras Evo-net
@@ -138,10 +353,15 @@ class Evo_net():
     def build_net(self, index):
         if not self.net_list[index]: #if not already built
             if self.parameters.use_neat:
-                self.net_list[index] = NEAT.NeuralNetwork();
-                self.genome_list[index].BuildPhenotype(self.net_list[index]);
-                self.genome_list[index].Save('test')
-                self.net_list[index].Flush()  # Build net from genome
+                if self.parameters.use_py_neat: #Python NEAT
+                    self.net_list[index] = nn.create_feed_forward_phenotype(self.genome_list[index])
+                else: #C++ NEAT
+                    self.net_list[index] = NEAT.NeuralNetwork();
+                    self.genome_list[index].BuildPhenotype(self.net_list[index]);
+                    self.net_list[index].Flush()  # Build net from genome
+                #self.genome_list[index].Save('test')
+
+
             else:
                 self.net_list[index] = self.pop.net_pop[int(self.pop.pop_handle[index][0])]
         #self.net_list[index].Save('a')
@@ -152,14 +372,17 @@ class Evo_net():
     def run_evo_net(self, index, state):
         scores = [] #Probability output for five action choices
         if self.parameters.use_neat:
-            self.net_list[index].Flush()
-            self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
-            self.net_list[index].Activate()
-            for i in range(5):
-                if not math.isnan(1 * self.net_list[index].Output()[i]):
-                    scores.append(1 * self.net_list[index].Output()[i])
-                else:
-                    scores.append(0)
+            if self.parameters.use_py_neat:  # Python NEAT
+                scores = self.net_list[index].serial_activate(state) #TODO Test
+            else:
+                self.net_list[index].Flush()
+                self.net_list[index].Input(state)  # can input numpy arrays, too for some reason only np.float64 is supported
+                self.net_list[index].Activate()
+                for i in range(5):
+                    if not math.isnan(1 * self.net_list[index].Output()[i]):
+                        scores.append(1 * self.net_list[index].Output()[i])
+                    else:
+                        scores.append(0)
         else: #Use keras Evo-net
             state = np.reshape(state, (1, len(state)))
             scores = self.net_list[index].predict(state)[0]
@@ -172,21 +395,35 @@ class Evo_net():
 
     def update_fitness(self): #Update the fitnesses of the genome and also encode the best one for the generation
         if self.parameters.use_neat:
-            youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
-            best = 0; best_sim_index = 0
-            for i, g in enumerate(self.genome_list):
-                if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
-                    avg_fitness = sum(self.fitness_evals[i])/len(self.fitness_evals[i])
-                    if avg_fitness > best:
-                        best = avg_fitness;
-                        best_sim_index = i
-                    g.SetFitness(avg_fitness) #Update fitness
-                    g.SetEvaluated() #Set as evaluated
-                    if g.GetID() > youngest: youngest = g.GetID();
-                    if g.GetID() < oldest: oldest = g.GetID();
-            self.oldest_genome_id = oldest
-            self.youngest_genome_id = youngest
-            self.delta_age = self.youngest_genome_id - self.oldest_genome_id
+            if self.parameters.use_py_neat: #Python NEAT
+                best = 0; best_sim_index = 0
+                for i, g in enumerate(self.genome_list):
+                    if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                        if self.parameters.leniency: avg_fitness = max(self.fitness_evals[i])  # Use lenient learner
+                        else: avg_fitness = sum(self.fitness_evals[i]) / len(self.fitness_evals[i])
+                        if avg_fitness > best:
+                            best = avg_fitness;
+                            best_sim_index = i
+                        g.fitness = avg_fitness #Update fitness
+
+            else: #C++ NEAT
+                youngest = 0; oldest = 10000000 #Magic intitalization numbers to find the oldest and youngest survuving genome
+                best = 0; best_sim_index = 0
+                for i, g in enumerate(self.genome_list):
+                    if len(self.fitness_evals[i]) != 0:  # if fitness evals is not empty (wasnt evaluated)
+                        if self.parameters.leniency: avg_fitness = max(self.fitness_evals[i])  # Use lenient learner
+                        else: avg_fitness = sum(self.fitness_evals[i]) / len(self.fitness_evals[i])
+                        if avg_fitness > best:
+                            best = avg_fitness;
+                            best_sim_index = i
+                        g.SetFitness(avg_fitness) #Update fitness
+                        g.SetEvaluated() #Set as evaluated
+                        if g.GetID() > youngest: youngest = g.GetID();
+                        if g.GetID() < oldest: oldest = g.GetID();
+                self.oldest_genome_id = oldest
+                self.youngest_genome_id = youngest
+                self.delta_age = self.youngest_genome_id - self.oldest_genome_id
+                self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc  # Update MPC's as well
 
         else: #Using keras Evo-net
             best = 0; best_sim_index = 0
@@ -200,7 +437,7 @@ class Evo_net():
         #print best
 
         if self.parameters.baldwin: self.bald.best_sim_index = best_sim_index #Assign the new top simulator #TODO Generalize this to best performing index and ignore if not evaluated
-        if self.parameters.use_neat: self.current_mpc = self.pop.GetCurrentMPC(); self.delta_mpc = self.current_mpc - self.base_mpc #Update MPC's as well
+
 
 class Agent:
     def __init__(self, grid, parameters):
@@ -293,7 +530,6 @@ class Agent:
         state = np.append(state, 0)  # Add action to the state
         state = np.reshape(state, (1, len(state)))
         return state
-
 
 class POI:
     def __init__(self, grid):
@@ -584,7 +820,7 @@ class statistics(): #Tracker
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt('avg_fitness.csv', np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
-class Population():
+class Population(): #Keras population
     def __init__(self, input_size, hidden_nodes, output, population_size, elite_fraction = 0.2):
         self.population_size = population_size
         self.elite_fraction = int(elite_fraction * population_size)
@@ -823,6 +1059,18 @@ def roulette_wheel(scores):
         counter += scores[i]
         if rand < counter:
             return i
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
